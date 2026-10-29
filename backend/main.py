@@ -1,7 +1,9 @@
 import asyncio
+import io
 import logging
 import os
 import time
+import wave
 from pathlib import PurePath
 
 import httpx
@@ -11,7 +13,7 @@ from pydantic import ValidationError
 from starlette.datastructures import UploadFile
 from starlette.responses import JSONResponse
 
-from providers import MAX_AUDIO, MODELS, ProviderError, Settings, transcribe
+from providers import GEMINI_MIME, MAX_AUDIO, MODELS, ProviderError, Settings, transcribe
 from streaming import STREAM_ERRORS, relay
 
 ORIGINS = [
@@ -94,11 +96,23 @@ async def batch(request: Request):
             raise HTTPException(
                 415, "OpenAI requires WAV, MP3, MP4, MPEG, MPGA, M4A, or WebM. Convert the file or deselect OpenAI."
             )
+        if settings.provider == "gemini" and suffix not in GEMINI_MIME:
+            raise HTTPException(415, "Gemini requires an audio file such as WAV, MP3, M4A, or WebM, not MP4 video.")
         data = await audio.read(MAX_AUDIO + 1)
         if not data:
             raise HTTPException(422, "Audio file is empty.")
         if len(data) > MAX_AUDIO:
             raise HTTPException(413, "Audio must be at most 24 MiB.")
+        if settings.provider == "sarvam" and suffix == ".wav":
+            try:
+                with wave.open(io.BytesIO(data), "rb") as recording:
+                    duration = recording.getnframes() / recording.getframerate()
+            except (wave.Error, EOFError):
+                raise HTTPException(415, "Sarvam WAV uploads must be readable PCM WAV files.") from None
+            if duration >= 30:
+                raise HTTPException(
+                    422, "Sarvam file clips must be under 30 seconds. Use live streaming for longer audio."
+                )
         try:
             await asyncio.wait_for(batch_slots.acquire(), timeout=0.1)
         except TimeoutError:

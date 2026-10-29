@@ -12,6 +12,9 @@ by side. This is a separate app from [TTS Compare](https://sidpandey3006.github.
 | OpenAI | `gpt-transcribe`, legacy 4o / Whisper models | Not implemented | Not implemented |
 | Deepgram | Nova 3 / Nova 2 | True WebSocket streaming | File and live |
 | Soniox | Asynchronous v5 / v4 file jobs | Real-time v5 / v4 WebSocket | File and live |
+| ElevenLabs | Scribe v2 / v1 | Scribe v2 Realtime, partials while speaking, final on Stop | File only |
+| Sarvam | Saaras v4 / v3, clips under 30 seconds | Saaras v4 / v3-realtime (beta), true partials | Not implemented |
+| Gemini | `gemini-3.5-transcribe`, dedicated transcription | Not implemented | File only |
 
 Model access, locales, multilingual coverage, and account availability differ by
 provider. A language selection does not imply every provider supports it.
@@ -24,7 +27,10 @@ prefer `gpt-transcribe`.
 - Upload up to 24 MiB. Mic recordings and live sessions are limited to five minutes.
   File requests time out after approximately five minutes; use shorter clips.
 - Choose models, language, speaker labels, Deepgram formatting, live endpoint
-  silence, and OpenAI / Soniox context.
+  silence, OpenAI / Soniox context, and Sarvam normalized/verbatim/code-mixed/Roman-script output.
+- Use **Add provider** to search and add adapters, including ElevenLabs, Sarvam,
+  and Gemini. Adding a card includes it and opens its settings. Remove cards to
+  clear their keys/results. Include all affects only visible cards.
 - Replay recorded/uploaded audio, copy transcripts, inspect provider-native
   timestamp/speaker details, and export a key-free JSON comparison.
 - Each card reports its own failure. Timing means observed backend request time,
@@ -34,9 +40,26 @@ prefer `gpt-transcribe`.
 **Recorded / file is not the same as a durable bulk-job queue.** Azure uses its
 synchronous Fast Transcription API, OpenAI and Deepgram use file endpoints, and
 Soniox creates and polls an asynchronous job. Large production batch workflows,
-Azure's separate Batch Transcription service, OpenAI Realtime, Google, and
-AssemblyAI are not implemented in this version. Uploaded files cannot be replayed
+Azure's separate Batch Transcription service, OpenAI Realtime, Gemini Live,
+Sarvam's long-audio batch API, and AssemblyAI are not implemented in this version. Uploaded files cannot be replayed
 through live streaming; use the microphone for live comparisons.
+
+Sarvam's file endpoint accepts **clips under 30 seconds**, not five-minute
+recordings. PCM WAV duration is checked before submission; for compressed formats,
+the provider enforces this limit. English locale hints are explicitly mapped to
+`en-IN`; unsupported non-Indian languages are rejected. Auto language detection is
+available. REST and realtime use their respective documented `od-IN` / `or-IN`
+Odia codes. Speaker labels require a different batch API and are not offered here.
+
+ElevenLabs live uses manual commits: interim text updates while speaking, then
+Stop commits the final transcript. File mode supports word timestamps and speaker
+labels; live speaker labels and endpoint-silence tuning are not offered here.
+
+Gemini uses the dedicated Transcribe model in verbatim mode, with word timestamps
+and optional speaker labels. Audio is inline in the Interactions request with
+`store: false`, avoiding a persistent Files API upload. This setting opts out of
+interaction storage; it is **not** a promise of zero provider retention. MP4 video
+is not accepted by this adapter; use M4A or another supported audio format.
 
 ## Local setup
 
@@ -65,7 +88,9 @@ Microphone capture requires HTTPS or localhost and AudioWorklet support.
 
 ### Provider credentials
 
-Open **Settings** on each included provider card and enter your own API key.
+Use **Add provider** for additional adapters, then open **Settings** on each
+included card and enter your own API key. ElevenLabs uses an ElevenLabs API key,
+Sarvam a subscription key, and Gemini a Gemini API key with model access.
 Azure file mode additionally requires the Speech **resource name**, not a
 Foundry project URL. Azure live mode needs the resource **region** (e.g. `eastus`)
 and an explicit locale. Azure file mode uses the resource-hosted
@@ -134,7 +159,7 @@ npm test
 
 Tests mock billable providers. They cover request contracts, independent errors,
 upload limits, secret-safe errors, Soniox cleanup, real PCM relay and finalization
-for all three live adapters, microphone WAV capture, interim text, and exports.
+for all five live adapters, provider additions/removals, microphone WAV capture, interim text, and exports.
 They do **not** establish successful transcription with real paid provider accounts.
 
 ## API references
@@ -145,3 +170,8 @@ They do **not** establish successful transcription with real paid provider accou
 - [Deepgram live API](https://developers.deepgram.com/reference/speech-to-text/listen-streaming)
 - [Soniox asynchronous transcription](https://soniox.com/docs/stt/async/async-transcription)
 - [Soniox real-time API](https://soniox.com/docs/api-reference/stt/websocket-api)
+- [ElevenLabs file transcription](https://elevenlabs.io/docs/api-reference/speech-to-text/convert)
+- [ElevenLabs realtime transcription](https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime)
+- [Sarvam file transcription](https://docs.sarvam.ai/api-reference/speech-to-text/transcribe)
+- [Sarvam realtime transcription](https://docs.sarvam.ai/api-reference/speech-to-text/transcribe/realtime/ws)
+- [Gemini Transcribe](https://ai.google.dev/gemini-api/docs/transcribe)

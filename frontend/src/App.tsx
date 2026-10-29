@@ -22,6 +22,9 @@ export default function App() {
   const [mode, setMode] = useState<Mode>('batch')
   const [options, setOptions] = useState(makeOptions)
   const [selected, setSelected] = useState<Provider[]>(['azure', 'openai', 'deepgram'])
+  const [visible, setVisible] = useState<Provider[]>(['azure', 'openai', 'deepgram', 'soniox'])
+  const [providerSearch, setProviderSearch] = useState('')
+  const providerDialog = useRef<HTMLDialogElement>(null)
   const [results, setResults] = useState(makeResults)
   const [file, setFile] = useState<File>()
   const [audioUrl, setAudioUrl] = useState('')
@@ -42,7 +45,8 @@ export default function App() {
   const cancelled = useRef(false)
   const mounted = useRef(true)
   const busy = phase !== 'idle'
-  const active = selected.filter(id => catalog.find(p => p.id === id)!.models[mode].length > 0)
+  const active = visible.filter(id => selected.includes(id) && catalog.find(p => p.id === id)!.models[mode].length > 0)
+  const available = catalog.filter(provider => !visible.includes(provider.id) && provider.name.toLowerCase().includes(providerSearch.toLowerCase().trim()))
 
   useEffect(() => {
     const controller = new AbortController()
@@ -101,7 +105,7 @@ export default function App() {
     return {
       ...options[id], language, mode,
       model: provider.models[mode].includes(options[id].model) ? options[id].model : provider.models[mode][0],
-      diarize: id === 'openai' || (id === 'azure' && mode === 'live') ? false : options[id].diarize,
+      diarize: provider.diarization.includes(mode) && options[id].diarize,
     }
   }
 
@@ -122,6 +126,24 @@ export default function App() {
 
   function changeOption(id: Provider, patch: Partial<Options>) {
     setOptions(previous => ({ ...previous, [id]: { ...previous[id], ...patch } }))
+  }
+
+  function addProvider(id: Provider) {
+    setVisible(previous => previous.includes(id) ? previous : [...previous, id])
+    setSelected(previous => previous.includes(id) ? previous : [...previous, id])
+    setDetails(previous => previous.includes(id) ? previous : [...previous, id])
+    providerDialog.current?.close()
+    const provider = catalog.find(value => value.id === id)!
+    setNotice(provider.models[mode].length ? `${provider.name} added. Enter its API key under Settings.` : `${provider.name} added. Switch to recorded/file mode to use this adapter.`)
+  }
+
+  function removeProvider(id: Provider) {
+    setVisible(previous => previous.filter(value => value !== id))
+    setSelected(previous => previous.filter(value => value !== id))
+    setDetails(previous => previous.filter(value => value !== id))
+    setOptions(previous => ({ ...previous, [id]: initialOptions(id) }))
+    update(id, emptyResult)
+    setNotice(`${catalog.find(provider => provider.id === id)!.name} removed. Its key and results have been cleared.`)
   }
 
   function upload(value?: File) {
@@ -282,11 +304,15 @@ export default function App() {
                 <option value="en-US">English (US)</option><option value="en-IN">English (India)</option><option value="en-GB">English (UK)</option>
                 <option value="hi-IN">Hindi</option><option value="ta-IN">Tamil</option><option value="te-IN">Telugu</option><option value="kn-IN">Kannada</option>
                 <option value="ml-IN">Malayalam</option><option value="mr-IN">Marathi</option><option value="bn-IN">Bengali</option><option value="gu-IN">Gujarati</option>
+                <option value="or-IN">Odia</option><option value="pa-IN">Punjabi</option><option value="as-IN">Assamese</option><option value="ur-IN">Urdu</option><option value="ne-IN">Nepali</option>
+                <option value="kok-IN">Konkani</option><option value="ks-IN">Kashmiri</option><option value="sd-IN">Sindhi</option><option value="sa-IN">Sanskrit</option><option value="sat-IN">Santali</option>
+                <option value="mni-IN">Manipuri</option><option value="brx-IN">Bodo</option><option value="mai-IN">Maithili</option><option value="doi-IN">Dogri</option>
                 <option value="es-ES">Spanish</option><option value="fr-FR">French</option><option value="de-DE">German</option>
                 <option value="ja-JP">Japanese</option><option value="zh-CN">Chinese</option><option value="ar-SA">Arabic</option>
               </select></label>
-              <button className="button subtle" onClick={() => setSelected(ids)}>Include all</button>
+              <button className="button subtle" onClick={() => setSelected(visible)}>Include all</button>
               <button className="button subtle" onClick={() => setSelected([])}>Clear</button>
+              <button className="button" onClick={() => { setProviderSearch(''); providerDialog.current?.showModal() }}>+ Add provider</button>
             </fieldset>
           </div>
 
@@ -310,7 +336,7 @@ export default function App() {
               <div className="audio-hint">{mode === 'live' ? 'True live PCM \u00b7 interim + final results' : 'WAV, MP3, M4A, WebM + more \u00b7 up to 24 MiB'}<span>{mode === 'live' ? 'Mic only \u00b7 five-minute session limit' : 'Mic recordings: 16 kHz mono \u00b7 up to five minutes'}</span></div>
             </div>
             {file && <div className="audio-preview"><div><span className="file-icon" aria-hidden="true">&#9835;</span><strong>{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(2)} MiB</span></div><audio controls src={audioUrl || undefined} aria-label="Audio playback" /><button className="button subtle" disabled={busy} onClick={() => { setFile(undefined); setNotice('') }}>Remove</button></div>}
-            <div className="input-footer"><p>{mode === 'batch' ? 'Recorded/file mode waits for complete audio. Azure uses Fast Transcription; Soniox queues an asynchronous job.' : 'Azure, Deepgram, and Soniox support live here. OpenAI is file-only in this version.'}</p>
+            <div className="input-footer"><p>{mode === 'batch' ? 'Recorded/file mode waits for complete audio. Azure uses Fast Transcription; Soniox queues an asynchronous job. Sarvam file clips must be under 30 seconds.' : 'Azure, Deepgram, Soniox, ElevenLabs, and Sarvam support live here. OpenAI and Gemini are file-only in this version.'}</p>
               {mode === 'batch' && <button className="button primary" disabled={busy || !file || !active.length} onClick={() => void runBatch()}>{phase === 'transcribing' ? 'Transcribing...' : `Transcribe with ${active.length} provider${active.length === 1 ? '' : 's'}`} <span aria-hidden="true">&rarr;</span></button>}
               {(phase === 'starting' || phase === 'transcribing' || phase === 'finishing') && <button className="button danger" onClick={cancel}>Cancel</button>}
             </div>
@@ -327,8 +353,8 @@ export default function App() {
           </div></div>
 
           <div className="provider-grid">
-            {catalog.map(provider => {
-              const id = provider.id
+            {visible.map(id => {
+              const provider = catalog.find(value => value.id === id)!
               const supported = provider.models[mode].length > 0
               const included = selected.includes(id)
               const result = results[id]
@@ -336,17 +362,21 @@ export default function App() {
               const open = details.includes(id)
               return <article className={`provider-card ${included && supported ? 'included' : 'excluded'}`} key={id} style={{ '--provider-color': provider.color } as React.CSSProperties} aria-label={provider.name}>
                 <div className="provider-heading"><div className="provider-identity"><span className="provider-logo">{provider.icon}</span><div><h3>{provider.name}</h3><span>{supported ? config.model : 'File mode only'}</span></div></div>
-                  <button disabled={busy || !supported} aria-pressed={included && supported} className={`include-button ${included && supported ? 'on' : ''}`} onClick={() => setSelected(previous => previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id])}>{!supported ? 'Unavailable' : included ? '\u2713 Included' : '+ Include'}</button>
+                  <div className="provider-card-actions"><button disabled={busy || !supported} aria-pressed={included && supported} className={`include-button ${included && supported ? 'on' : ''}`} onClick={() => setSelected(previous => previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id])}>{!supported ? 'Unavailable' : included ? '\u2713 Included' : '+ Include'}</button><button className="remove-provider" disabled={busy} aria-label={`Remove ${provider.name}`} title={`Remove ${provider.name} and clear its key`} onClick={() => removeProvider(id)}>{'\u00d7'}</button></div>
                 </div>
                 <div className="provider-config"><span className={`status ${result.status}`}><i />{statusLabels[result.status]}</span><button aria-expanded={open} className="settings-toggle" onClick={() => setDetails(previous => open ? previous.filter(value => value !== id) : [...previous, id])}>Settings {open ? '\u2212' : '+'}</button></div>
                 {open && <fieldset className="settings-panel" disabled={busy || !supported}>
                   <label>API key <input type="password" autoComplete="off" spellCheck={false} aria-label={`${provider.name} API key`} value={options[id].api_key} placeholder="Kept in memory for this tab" onChange={event => changeOption(id, { api_key: event.target.value })} /></label>
                   <label>Model <select aria-label={`${provider.name} model`} value={config.model ?? ''} onChange={event => changeOption(id, { model: event.target.value })}>{provider.models[mode].map(model => <option key={model}>{model}</option>)}</select></label>
                   {id === 'azure' && <label>{mode === 'batch' ? 'Azure resource name' : 'Azure region'}<input aria-label={mode === 'batch' ? 'Azure resource name' : 'Azure region'} value={mode === 'batch' ? options.azure.resource : options.azure.region} placeholder={mode === 'batch' ? 'my-speech-resource (not a URL)' : 'eastus'} onChange={event => changeOption(id, mode === 'batch' ? { resource: event.target.value } : { region: event.target.value })} /></label>}
-                  {id !== 'openai' && !(id === 'azure' && mode === 'live') && <label className="check-label"><input type="checkbox" checked={config.diarize} onChange={event => changeOption(id, { diarize: event.target.checked })} /> Speaker diarization (labels in Details / JSON)</label>}
+                  {provider.diarization.includes(mode) && <label className="check-label"><input type="checkbox" checked={config.diarize} onChange={event => changeOption(id, { diarize: event.target.checked })} /> Speaker diarization (labels in Details / JSON)</label>}
                   {id === 'deepgram' && <label className="check-label"><input type="checkbox" checked={config.punctuate} onChange={event => changeOption(id, { punctuate: event.target.checked })} /> Punctuation and smart formatting</label>}
-                  {mode === 'live' && (id === 'deepgram' || id === 'soniox') && <label>Endpoint silence: {config.endpoint_ms} ms<input aria-label={`${provider.name} endpoint silence`} type="range" min="500" max="3000" step="100" value={config.endpoint_ms} onChange={event => changeOption(id, { endpoint_ms: Number(event.target.value) })} /></label>}
+                  {mode === 'live' && (id === 'deepgram' || id === 'soniox' || id === 'sarvam') && <label>Endpoint silence: {config.endpoint_ms} ms<input aria-label={`${provider.name} endpoint silence`} type="range" min="500" max="3000" step="100" value={config.endpoint_ms} onChange={event => changeOption(id, { endpoint_ms: Number(event.target.value) })} /></label>}
                   {(id === 'openai' || id === 'soniox') && <label>Transcription context (optional)<textarea value={config.prompt} maxLength={2000} placeholder="Relevant names, terminology, or context" onChange={event => changeOption(id, { prompt: event.target.value })} /></label>}
+                  {id === 'sarvam' && <><label>Output mode<select aria-label="Sarvam output mode" value={config.sarvam_mode} onChange={event => {
+                    const value = event.target.value
+                    if (value === 'transcribe' || value === 'verbatim' || value === 'codemix' || value === 'translit') changeOption(id, { sarvam_mode: value })
+                  }}><option value="transcribe">Transcribe (normalized)</option><option value="verbatim">Verbatim (include fillers)</option><option value="codemix">Code-mixed (native + English)</option><option value="translit">Transliterate to Roman script</option></select></label><p>English hints use Sarvam's en-IN code for all English locales. Auto uses the provider's language detection.</p></>}
                   <p>{provider.note}. Language and model availability depend on your account.</p>
                   {id === 'openai' && <p>Legacy Whisper / 4o models retire February 26, 2027. Prefer gpt-transcribe.</p>}
                 </fieldset>}
@@ -360,8 +390,21 @@ export default function App() {
               </article>
             })}
           </div>
+          {visible.length === 0 && <div className="empty-providers">No providers yet. Choose <strong>Add provider</strong> above to start a comparison.</div>}
           <div className="studio-bottom"><span>Same input. Independent requests. One provider failing never blocks the others.</span><button className="button subtle" disabled={busy || !hasResults} onClick={() => { setResults(makeResults()); setNotice('Results cleared.') }}>Clear results</button></div>
         </section>
+
+        <dialog ref={providerDialog} aria-labelledby="provider-dialog-title" className="provider-dialog">
+          <div className="provider-dialog-heading"><div><h2 id="provider-dialog-title">Add a provider</h2><p>Choose an adapter, then enter your own API key.</p></div><form method="dialog"><button className="remove-provider" aria-label="Close provider picker">{'\u00d7'}</button></form></div>
+          <label className="provider-search">Search providers<input autoFocus type="search" value={providerSearch} onChange={event => setProviderSearch(event.target.value)} placeholder="ElevenLabs, Sarvam, Gemini..." /></label>
+          <div className="provider-picker-list">
+            {available.map(provider => <button key={provider.id} disabled={busy} aria-label={`Add ${provider.name}`} onClick={() => addProvider(provider.id)} className="provider-choice">
+              <span className="provider-logo" style={{ color: provider.color }}>{provider.icon}</span><span className="provider-choice-text"><strong>{provider.name}</strong><span>{provider.note}</span><small>{provider.models.live.length ? 'Recorded / file + live streaming' : 'Recorded / file only in this app'}</small></span><span aria-hidden="true">+</span>
+            </button>)}
+            {available.length === 0 && <p className="picker-empty">{visible.length === catalog.length ? 'All available providers have been added.' : 'No matching providers.'}</p>}
+          </div>
+          <p className="picker-footnote">Only included cards receive audio. Removing a card clears its key and results. Custom provider URLs are not supported.</p>
+        </dialog>
 
         <section className="how-it-works"><div><span>01</span><h3>Bring your audio</h3><p>Record from your microphone or upload a file. Live mode streams the same 16 kHz PCM to each provider.</p></div><div><span>02</span><h3>Choose your models</h3><p>Use your own provider keys. Tune language, speaker labels, and available model-specific settings.</p></div><div><span>03</span><h3>Trust your own ears</h3><p>Read transcripts side by side. Export results for review. Observed timings are not controlled benchmarks.</p></div></section>
         <div className="privacy-note"><strong>Your audio, your choice.</strong> Audio and keys pass through this backend to your selected providers. This app does not intentionally save them or log request bodies. Provider retention policies and charges still apply. Soniox file jobs are deleted after processing; cleanup failures are reported. Do not upload sensitive audio. Cancel stops local delivery but cannot guarantee cancellation of upstream work.</div>

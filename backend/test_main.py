@@ -1,7 +1,11 @@
 import asyncio
+import base64
+import io
 import json
+import wave
 from types import SimpleNamespace
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -23,6 +27,9 @@ def config(provider="openai", mode="batch", **overrides):
         "azure": "azure-transcribe" if mode == "batch" else "azure-realtime",
         "deepgram": "nova-3",
         "soniox": "stt-async-v5" if mode == "batch" else "stt-rt-v5",
+        "elevenlabs": "scribe_v2" if mode == "batch" else "scribe_v2_realtime",
+        "sarvam": "saaras:v4",
+        "gemini": "gemini-3.5-transcribe",
     }
     return {
         "provider": provider,
@@ -46,6 +53,147 @@ def upload(client, options=None, content=b"RIFF-test-audio", name="clip.wav"):
         files={"audio": (name, content, "audio/wav")},
         data={"settings": json.dumps(options or config())},
     )
+
+
+def pcm_wav(seconds=1):
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as recording:
+        recording.setnchannels(1)
+        recording.setsampwidth(2)
+        recording.setframerate(16000)
+        recording.writeframes(b"\0\0" * (16000 * seconds))
+    return buffer.getvalue()
+
+
+@respx.mock
+def test_elevenlabs_file_transcription_contract(client):
+    route = respx.post("https://api.elevenlabs.io/v1/speech-to-text").respond(
+        200,
+        json={"text": "Hello", "words": [{"text": "Hello", "start": 0.1, "end": 0.5, "speaker_id": "speaker_0"}]},
+    )
+    response = upload(client, config("elevenlabs", language="hi-IN", diarize=True))
+    assert response.status_code == 200
+    assert response.json()["text"] == "Hello"
+    assert response.json()["segments"][0]["speaker_id"] == "speaker_0"
+    request = route.calls.last.request
+    assert request.headers["xi-api-key"] == KEY
+    assert b'name="model_id"\r\n\r\nscribe_v2' in request.content
+    assert b'name="language_code"\r\n\r\nhi' in request.content
+    assert b'name="diarize"\r\n\r\ntrue' in request.content
+    assert b'name="timestamps_granularity"\r\n\r\nword' in request.content
+    assert b"RIFF-test-audio" in request.content
+
+
+@pytest.mark.parametrize(("language", "expected"), [("en-US", "en-IN"), ("auto", "unknown"), ("or-IN", "od-IN")])
+@respx.mock
+def test_sarvam_file_language_output_and_timestamps(client, language, expected):
+    timestamps = {"words": ["Hello"], "start_time_seconds": [0.1], "end_time_seconds": [0.5]}
+    route = respx.post("https://api.sarvam.ai/speech-to-text").respond(
+        200,
+        json={"transcript": "Hello", "timestamps": timestamps},
+    )
+    response = upload(client, config("sarvam", language=language, sarvam_mode="codemix"), content=pcm_wav())
+    assert response.status_code == 200
+    assert response.json()["text"] == "Hello"
+    assert response.json()["segments"] == [timestamps]
+    request = route.calls.last.request
+    assert request.headers["api-subscription-key"] == KEY
+    assert f'name="language_code"\r\n\r\n{expected}'.encode() in request.content
+    assert b'name="mode"\r\n\r\ncodemix' in request.content
+    assert b'name="with_timestamps"\r\n\r\ntrue' in request.content
+
+
+@pytest.mark.parametrize("content", [pcm_wav(30), b"RIFF-invalid"], ids=["long-wav", "invalid-wav"])
+@respx.mock
+def test_sarvam_wav_limits_prevent_provider_submission(client, content):
+    route = respx.post("https://api.sarvam.ai/speech-to-text").respond(200, json={})
+    response = upload(client, config("sarvam"), content=content)
+    assert response.status_code in {415, 422}
+    assert "Sarvam" in response.json()["detail"]
+    assert not route.called
+
+
+@respx.mock
+def test_gemini_dedicated_model_inline_audio_and_annotations(client):
+    word = {"type": "word_info", "text": "Hello", "speaker": "spk_1", "start_offset": "0.100s", "end_offset": "0.400s"}
+    route = respx.post("https://generativelanguage.googleapis.com/v1beta/interactions").respond(
+        200,
+        json={
+            "status": "completed",
+            "steps": [
+                {"type": "thought", "content": [{"type": "text", "text": "Not a transcript"}]},
+                {"type": "model_output", "content": [{"type": "text", "text": "Hello", "annotations": [word]}]},
+            ],
+        },
+    )
+    response = upload(client, config("gemini", diarize=True), name="clip.m4a")
+    assert response.status_code == 200
+    assert response.json()["text"] == "Hello"
+    assert response.json()["segments"] == [word]
+    request = route.calls.last.request
+    assert request.headers["x-goog-api-key"] == KEY
+    assert KEY not in str(request.url)
+    body = json.loads(request.content)
+    assert body["model"] == "gemini-3.5-transcribe"
+    assert body["store"] is False
+    assert body["input"] == [
+        {"type": "audio", "data": base64.b64encode(b"RIFF-test-audio").decode(), "mime_type": "audio/m4a"}
+    ]
+    assert body["generation_config"]["transcription_config"] == {
+        "language_codes": ["en-US"],
+        "mode": {"type": "verbatim", "timestamp_granularities": ["word"], "diarization_mode": "speaker"},
+    }
+
+
+@pytest.mark.parametrize("status", ["failed", "in_progress", "completed"])
+@respx.mock
+def test_gemini_missing_or_incomplete_transcript_is_not_success(client, status):
+    respx.post("https://generativelanguage.googleapis.com/v1beta/interactions").respond(
+        200,
+        json={"status": status, "steps": [], "error": {"message": f"{KEY} private audio"}},
+    )
+    response = upload(client, config("gemini"))
+    assert response.status_code == 502
+    assert KEY not in response.text and "private audio" not in response.text
+
+
+def test_gemini_rejects_video_container(client):
+    response = upload(client, config("gemini"), name="video.mp4")
+    assert response.status_code == 415
+    assert "M4A" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("provider", "overrides"),
+    [
+        ("sarvam", {"diarize": True}),
+        ("sarvam", {"language": "fr-FR"}),
+        ("elevenlabs", {"mode": "live", "model": "scribe_v2_realtime", "diarize": True}),
+        ("gemini", {"mode": "live"}),
+        ("gemini", {"sarvam_mode": "codemix"}),
+    ],
+)
+def test_new_provider_settings_reject_unsupported_capabilities(client, provider, overrides):
+    response = upload(client, config(provider, **overrides))
+    assert response.status_code == 422
+    assert KEY not in response.text
+
+
+@pytest.mark.parametrize(
+    ("provider", "url"),
+    [
+        ("elevenlabs", "https://api.elevenlabs.io/v1/speech-to-text"),
+        ("sarvam", "https://api.sarvam.ai/speech-to-text"),
+        ("gemini", "https://generativelanguage.googleapis.com/v1beta/interactions"),
+    ],
+)
+@respx.mock
+def test_new_provider_errors_are_secret_safe(client, provider, url):
+    respx.post(url).respond(401, json={"message": f"{KEY} private audio"})
+    response = upload(client, config(provider), content=pcm_wav())
+    assert response.status_code == 502
+    assert "HTTP 401" in response.json()["detail"]
+    assert KEY not in response.text and "private audio" not in response.text
 
 
 @respx.mock
@@ -278,6 +426,154 @@ class FakeUpstream:
             else:
                 await self.queue.put({"tokens": [{"text": " world", "is_final": True}], "finished": True})
             await self.queue.put(None)
+
+
+class JsonUpstream(FakeUpstream):
+    async def __aenter__(self):
+        self.audio_received = False
+        await self.queue.put(
+            {"message_type": "session_started"} if self.provider == "elevenlabs" else {"event": "session.begin"}
+        )
+        return self
+
+    async def recv(self):
+        return await self.__anext__()
+
+    async def close(self):
+        await self.queue.put(None)
+
+    async def send(self, value):
+        self.sent.append(value)
+        event = json.loads(value)
+        eleven = self.provider == "elevenlabs"
+        if event.get("commit") or event.get("event") == "end":
+            if self.audio_received:
+                await self.queue.put(
+                    {"message_type": "committed_transcript", "text": "Hello world"}
+                    if eleven
+                    else {
+                        "event": "transcript.final",
+                        "text": "Hello world",
+                        "utterance_idx": 0,
+                        "start_s": 0,
+                        "end_s": 1,
+                    }
+                )
+            if not eleven:
+                await self.queue.put({"event": "session.end"})
+            await self.queue.put(None)
+        elif self.failure:
+            await self.queue.put(
+                {"message_type": "auth_error", "error": f"{KEY} private audio"}
+                if eleven
+                else {"event": "error", "message": f"{KEY} private audio", "is_fatal": True}
+            )
+        else:
+            self.audio_received = True
+            await self.queue.put(
+                {"message_type": "partial_transcript", "text": "Hello"}
+                if eleven
+                else {"event": "transcript.partial", "text": "Hello", "utterance_idx": 0}
+            )
+
+
+@pytest.mark.parametrize("provider", ["elevenlabs", "sarvam"])
+def test_json_live_encodes_pcm_and_drains_final_on_stop(client, monkeypatch, provider):
+    upstream = JsonUpstream(provider)
+    connector = Mock(return_value=upstream)
+    monkeypatch.setattr(streaming, "connect", connector)
+    pcm = b"\x01\x00" * 2048
+    with client.websocket_connect("/api/live", headers={"Origin": ORIGIN}) as socket:
+        socket.send_json(config(provider, mode="live"))
+        assert socket.receive_json()["type"] == "ready"
+        socket.send_bytes(pcm)
+        interim = socket.receive_json()
+        assert interim["text"] == "Hello" and interim["final"] is False
+        socket.send_text('{"type":"stop"}')
+        final = socket.receive_json()
+        assert final["text"] == "Hello world" and final["final"] is True
+        assert socket.receive_json()["type"] == "done"
+    audio, stop = [json.loads(value) for value in upstream.sent]
+    assert base64.b64decode(audio["audio_base_64"] if provider == "elevenlabs" else audio["audio"]) == pcm
+    url = connector.call_args.args[0]
+    params = parse_qs(urlparse(url).query)
+    assert KEY not in url
+    headers = connector.call_args.kwargs["additional_headers"]
+    if provider == "elevenlabs":
+        assert headers["xi-api-key"] == KEY
+        assert params["commit_strategy"] == ["manual"]
+        assert audio["commit"] is False and stop["commit"] is True
+        assert stop["audio_base_64"] == ""
+    else:
+        assert headers["api-subscription-key"] == KEY
+        assert params["language_code"] == ["en-IN"]
+        assert params["stream_type"] == ["balanced"]
+        assert stop == {"event": "end"}
+
+
+@pytest.mark.parametrize("provider", ["elevenlabs", "sarvam"])
+def test_json_live_surfaces_sanitized_errors_and_releases_slots(client, monkeypatch, provider):
+    monkeypatch.setattr(streaming, "connect", lambda *_, **__: JsonUpstream(provider, failure=True))
+    with client.websocket_connect("/api/live", headers={"Origin": ORIGIN}) as socket:
+        socket.send_json(config(provider, mode="live"))
+        assert socket.receive_json()["type"] == "ready"
+        socket.send_bytes(b"\0\0")
+        response = socket.receive_json()
+        assert response["type"] == "error"
+        assert KEY not in str(response) and "private audio" not in str(response)
+    assert main.live_slots._value == 12
+
+
+@pytest.mark.parametrize("provider", ["elevenlabs", "sarvam"])
+def test_json_live_stop_without_audio_does_not_hang(client, monkeypatch, provider):
+    upstream = JsonUpstream(provider)
+    monkeypatch.setattr(streaming, "connect", lambda *_, **__: upstream)
+    with client.websocket_connect("/api/live", headers={"Origin": ORIGIN}) as socket:
+        socket.send_json(config(provider, mode="live"))
+        assert socket.receive_json()["type"] == "ready"
+        socket.send_text('{"type":"stop"}')
+        response = socket.receive_json()
+        assert response["type"] == "done"
+
+
+@pytest.mark.parametrize("provider", ["elevenlabs", "sarvam"])
+def test_json_live_waits_for_provider_readiness(client, monkeypatch, provider):
+    upstream = JsonUpstream(provider)
+
+    async def rejected_start():
+        return json.dumps({"error": f"{KEY} private audio"})
+
+    monkeypatch.setattr(upstream, "recv", rejected_start)
+    monkeypatch.setattr(streaming, "connect", lambda *_, **__: upstream)
+    with client.websocket_connect("/api/live", headers={"Origin": ORIGIN}) as socket:
+        socket.send_json(config(provider, mode="live"))
+        response = socket.receive_json()
+        assert response["type"] == "error"
+        assert KEY not in str(response) and "private audio" not in str(response)
+    assert main.live_slots._value == 12
+
+
+@pytest.mark.parametrize("provider", ["elevenlabs", "sarvam"])
+def test_json_live_requires_final_confirmation_after_stop(client, monkeypatch, provider):
+    class DroppedFinal(JsonUpstream):
+        async def send(self, value):
+            event = json.loads(value)
+            if event.get("commit") or event.get("event") == "end":
+                await self.queue.put(None)
+            else:
+                await super().send(value)
+
+    monkeypatch.setattr(streaming, "connect", lambda *_, **__: DroppedFinal(provider))
+    with client.websocket_connect("/api/live", headers={"Origin": ORIGIN}) as socket:
+        socket.send_json(config(provider, mode="live"))
+        assert socket.receive_json()["type"] == "ready"
+        socket.send_bytes(b"\0\0")
+        assert socket.receive_json()["text"] == "Hello"
+        socket.send_text('{"type":"stop"}')
+        response = socket.receive_json()
+        assert response["type"] == "error"
+        assert "confirming final transcription" in response["message"]
+    assert main.live_slots._value == 12
 
 
 @pytest.mark.parametrize("provider", ["deepgram", "soniox"])

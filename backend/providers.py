@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -15,13 +16,55 @@ MODELS = {
     "openai": {"batch": ["gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"], "live": []},
     "deepgram": {"batch": ["nova-3", "nova-2"], "live": ["nova-3", "nova-2"]},
     "soniox": {"batch": ["stt-async-v5", "stt-async-v4"], "live": ["stt-rt-v5", "stt-rt-v4"]},
+    "elevenlabs": {"batch": ["scribe_v2", "scribe_v1"], "live": ["scribe_v2_realtime"]},
+    "sarvam": {"batch": ["saaras:v4", "saaras:v3"], "live": ["saaras:v4", "saaras:v3-realtime"]},
+    "gemini": {"batch": ["gemini-3.5-transcribe"], "live": []},
+}
+SARVAM_LANGUAGES = {
+    "auto",
+    "en-IN",
+    "hi-IN",
+    "bn-IN",
+    "kn-IN",
+    "ml-IN",
+    "mr-IN",
+    "od-IN",
+    "or-IN",
+    "pa-IN",
+    "ta-IN",
+    "te-IN",
+    "gu-IN",
+    "as-IN",
+    "ur-IN",
+    "ne-IN",
+    "kok-IN",
+    "ks-IN",
+    "sd-IN",
+    "sa-IN",
+    "sat-IN",
+    "mni-IN",
+    "brx-IN",
+    "mai-IN",
+    "doi-IN",
+}
+GEMINI_MIME = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mp3",
+    ".mpeg": "audio/mpeg",
+    ".mpga": "audio/mpeg",
+    ".m4a": "audio/m4a",
+    ".webm": "audio/webm",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+    ".aac": "audio/aac",
+    ".opus": "audio/opus",
 }
 logger = logging.getLogger("stt.providers")
 
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    provider: Literal["azure", "openai", "deepgram", "soniox"]
+    provider: Literal["azure", "openai", "deepgram", "soniox", "elevenlabs", "sarvam", "gemini"]
     api_key: SecretStr = Field(min_length=1, max_length=4096)
     mode: Literal["batch", "live"] = "batch"
     model: str = Field(max_length=80)
@@ -32,6 +75,7 @@ class Settings(BaseModel):
     punctuate: bool = True
     endpoint_ms: int = Field(default=1000, ge=500, le=3000)
     prompt: str = Field(default="", max_length=2000)
+    sarvam_mode: Literal["transcribe", "verbatim", "codemix", "translit"] = "transcribe"
 
     @model_validator(mode="after")
     def supported(self):
@@ -50,6 +94,15 @@ class Settings(BaseModel):
                 raise ValueError("Speaker labels are not available in this Azure live adapter.")
         if self.provider == "openai" and self.diarize:
             raise ValueError("Speaker labels are not supported by these OpenAI models.")
+        if self.provider == "sarvam":
+            if self.diarize:
+                raise ValueError("This Sarvam REST/realtime adapter does not support speaker labels.")
+            if self.sarvam_language not in SARVAM_LANGUAGES:
+                raise ValueError("Sarvam supports English and Indian languages only.")
+        if self.provider == "elevenlabs" and self.mode == "live" and self.diarize:
+            raise ValueError("Speaker labels are available only in ElevenLabs file mode.")
+        if self.provider != "sarvam" and self.sarvam_mode != "transcribe":
+            raise ValueError("Sarvam output mode is available only for Sarvam.")
         if self.prompt and self.provider not in {"openai", "soniox"}:
             raise ValueError("Context is supported only by OpenAI and Soniox adapters.")
         return self
@@ -61,6 +114,14 @@ class Settings(BaseModel):
     @property
     def lang(self) -> str:
         return self.language.split("-")[0]
+
+    @property
+    def sarvam_language(self) -> str:
+        if self.lang == "en":
+            return "en-IN"
+        if self.language in {"od-IN", "or-IN"}:
+            return "od-IN" if self.mode == "batch" else "or-IN"
+        return self.language
 
 
 class ProviderError(Exception):
@@ -152,7 +213,96 @@ async def transcribe(s: Settings, audio: bytes, filename: str, content_type: str
             )
             alternative = result["results"]["channels"][0]["alternatives"][0]
             return {"text": alternative["transcript"], "segments": alternative.get("words", []), "warnings": []}
-        return await soniox_batch(client, s, audio, filename, content_type)
+        if s.provider == "elevenlabs":
+            data = {
+                "model_id": s.model,
+                "diarize": str(s.diarize).lower(),
+                "timestamps_granularity": "word",
+                "tag_audio_events": "false",
+            }
+            if s.language != "auto":
+                data["language_code"] = s.lang
+            result = checked(
+                await client.post(
+                    "https://api.elevenlabs.io/v1/speech-to-text",
+                    headers={"xi-api-key": s.key},
+                    files={"file": (filename, audio, content_type)},
+                    data=data,
+                )
+            )
+            return {"text": result["text"], "segments": result.get("words", []), "warnings": []}
+        if s.provider == "sarvam":
+            result = checked(
+                await client.post(
+                    "https://api.sarvam.ai/speech-to-text",
+                    headers={"api-subscription-key": s.key},
+                    files={"file": (filename, audio, content_type)},
+                    data={
+                        "model": s.model,
+                        "mode": s.sarvam_mode,
+                        "with_timestamps": "true",
+                        "language_code": "unknown" if s.language == "auto" else s.sarvam_language,
+                    },
+                )
+            )
+            timestamps = result.get("timestamps")
+            return {"text": result["transcript"], "segments": [timestamps] if timestamps else [], "warnings": []}
+        if s.provider == "gemini":
+            suffix = "." + filename.rsplit(".", 1)[-1].lower()
+            if suffix not in GEMINI_MIME:
+                raise ProviderError(
+                    "Gemini file mode requires an audio file such as WAV, MP3, M4A, or WebM, not MP4 video."
+                )
+            mode = {"type": "verbatim", "timestamp_granularities": ["word"]}
+            if s.diarize:
+                mode["diarization_mode"] = "speaker"
+            result = checked(
+                await client.post(
+                    "https://generativelanguage.googleapis.com/v1beta/interactions",
+                    headers={"x-goog-api-key": s.key},
+                    json={
+                        "model": s.model,
+                        "store": False,
+                        "input": [
+                            {
+                                "type": "audio",
+                                "data": base64.b64encode(audio).decode("ascii"),
+                                "mime_type": GEMINI_MIME[suffix],
+                            }
+                        ],
+                        "generation_config": {
+                            "transcription_config": {
+                                "language_codes": [] if s.language == "auto" else [s.language],
+                                "mode": mode,
+                            }
+                        },
+                    },
+                )
+            )
+            if result.get("status") != "completed":
+                raise ProviderError("Gemini did not complete the transcription. Check model access and retry.")
+            contents = [
+                content
+                for step in result.get("steps", [])
+                if step.get("type") == "model_output"
+                for content in step.get("content", [])
+                if content.get("type") == "text"
+            ]
+            if not contents:
+                raise ProviderError("Gemini returned no transcript content. The request may have been blocked.")
+            return {
+                "text": "".join(content["text"] for content in contents),
+                "segments": [
+                    annotation
+                    for content in contents
+                    for annotation in content.get("annotations", [])
+                    if annotation.get("type") == "word_info"
+                ],
+                "warnings": [],
+            }
+        if s.provider == "soniox":
+            return await soniox_batch(client, s, audio, filename, content_type)
+        raise ProviderError("Provider adapter is not available.")
 
 
 async def soniox_batch(client: httpx.AsyncClient, s: Settings, audio: bytes, filename: str, content_type: str) -> dict:

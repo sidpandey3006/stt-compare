@@ -21,6 +21,115 @@ async function upload(page: Page) {
   })
 }
 
+async function addProvider(page: Page, name: string) {
+  await page.getByRole('button', { name: '+ Add provider', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Add a provider' }).getByRole('button', { name: `Add ${name}`, exact: true }).click()
+  return page.getByRole('article', { name, exact: true })
+}
+
+test('provider picker searches, avoids duplicates, and clears removed keys', async ({ page }) => {
+  await setup(page)
+  let card = await addProvider(page, 'ElevenLabs')
+  await expect(card.getByRole('button', { name: /Included/ })).toHaveAttribute('aria-pressed', 'true')
+  await card.getByLabel('ElevenLabs API key', { exact: true }).fill('test-key-not-real')
+  await page.getByRole('button', { name: '+ Add provider', exact: true }).click()
+  const picker = page.getByRole('dialog', { name: 'Add a provider' })
+  await expect(picker.getByRole('button', { name: 'Add ElevenLabs', exact: true })).toHaveCount(0)
+  await picker.getByLabel('Search providers', { exact: true }).fill('sarv')
+  await expect(picker.getByRole('button', { name: 'Add Sarvam', exact: true })).toBeVisible()
+  await expect(picker.getByRole('button', { name: 'Add Gemini', exact: true })).toHaveCount(0)
+  await picker.getByLabel('Search providers', { exact: true }).fill('unknown')
+  await expect(picker.getByText('No matching providers.', { exact: true })).toBeVisible()
+  await picker.getByLabel('Search providers', { exact: true }).fill('')
+  await page.keyboard.press('Escape')
+  await expect(picker).not.toBeVisible()
+  await card.getByRole('button', { name: 'Remove ElevenLabs', exact: true }).click()
+  await expect(page.getByRole('article')).toHaveCount(4)
+  await page.getByRole('button', { name: 'Include all', exact: true }).click()
+  await upload(page)
+  await expect(page.getByRole('button', { name: 'Transcribe with 4 providers', exact: true })).toBeVisible()
+  card = await addProvider(page, 'ElevenLabs')
+  await expect(card.getByLabel('ElevenLabs API key', { exact: true })).toHaveValue('')
+  await expect(page.getByRole('article')).toHaveCount(5)
+})
+
+test('added providers expose only implemented file and live settings', async ({ page }) => {
+  await setup(page)
+  const eleven = await addProvider(page, 'ElevenLabs')
+  const sarvam = await addProvider(page, 'Sarvam')
+  const gemini = await addProvider(page, 'Gemini')
+  await expect(eleven.getByLabel('Speaker diarization', { exact: false })).toBeVisible()
+  await expect(gemini.getByLabel('Speaker diarization', { exact: false })).toBeVisible()
+  await expect(sarvam.getByLabel('Speaker diarization', { exact: false })).toHaveCount(0)
+  await expect(sarvam).toContainText('under 30 seconds')
+  await sarvam.getByLabel('Sarvam output mode', { exact: true }).selectOption('codemix')
+  await page.getByRole('button', { name: 'Live streaming', exact: true }).click()
+  await expect(eleven.getByLabel('ElevenLabs model', { exact: true })).toHaveValue('scribe_v2_realtime')
+  await expect(eleven.getByLabel('Speaker diarization', { exact: false })).toHaveCount(0)
+  await expect(sarvam.getByLabel('Sarvam endpoint silence', { exact: true })).toBeVisible()
+  await expect(sarvam.getByLabel('Sarvam output mode', { exact: true })).toHaveValue('codemix')
+  await expect(gemini.getByRole('button', { name: 'Unavailable', exact: true })).toBeDisabled()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: '+ Add provider', exact: true }).click()
+  const picker = page.getByRole('dialog', { name: 'Add a provider' })
+  await expect(picker.getByText('All available providers have been added.', { exact: true })).toBeVisible()
+  expect(await picker.evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth)).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
+
+test('new provider cards dispatch independently and removal clears results and export', async ({ page }) => {
+  await setup(page)
+  await page.getByRole('button', { name: 'Clear', exact: true }).click()
+  const providers = [['ElevenLabs', 'elevenlabs'], ['Sarvam', 'sarvam'], ['Gemini', 'gemini']]
+  for (const [name] of providers) {
+    const card = await addProvider(page, name)
+    await card.getByLabel(`${name} API key`, { exact: true }).fill('test-key-not-real')
+  }
+  const requested: string[] = []
+  await page.route('**/api/transcribe', async route => {
+    const body = route.request().postDataBuffer()!.toString()
+    const provider = providers.find(([, id]) => body.includes(`"provider":"${id}"`))!
+    requested.push(provider[1])
+    await route.fulfill({ json: { text: `${provider[0]} result`, segments: [], warnings: [], elapsed_ms: 100, model: provider[1] } })
+  })
+  await upload(page)
+  await page.getByRole('button', { name: 'Transcribe with 3 providers', exact: true }).click()
+  for (const [name] of providers) await expect(page.getByLabel(`${name} transcript`, { exact: true })).toContainText(`${name} result`)
+  expect(requested.sort()).toEqual(['elevenlabs', 'gemini', 'sarvam'])
+  for (const [name] of providers) await page.getByRole('button', { name: `Remove ${name}`, exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Export JSON' })).toBeDisabled()
+  const eleven = await addProvider(page, 'ElevenLabs')
+  await expect(eleven.getByLabel('ElevenLabs API key', { exact: true })).toHaveValue('')
+  await expect(eleven.getByLabel('ElevenLabs transcript', { exact: true })).not.toContainText('ElevenLabs result')
+})
+
+for (const outcome of ['error', 'cancel']) {
+  test(`preserves ElevenLabs provisional text when finalization ends with ${outcome}`, async ({ page }) => {
+    await page.routeWebSocket('**/api/live', socket => {
+      socket.onMessage(data => {
+        if (typeof data !== 'string') {
+          socket.send(JSON.stringify({ type: 'transcript', text: 'Provisional words', final: false }))
+        } else if (JSON.parse(data).type === 'stop') {
+          if (outcome === 'error') socket.send(JSON.stringify({ type: 'error', message: 'Provider closed before final confirmation.' }))
+        } else socket.send(JSON.stringify({ type: 'ready' }))
+      })
+    })
+    await setup(page)
+    await page.getByRole('button', { name: 'Clear', exact: true }).click()
+    const eleven = await addProvider(page, 'ElevenLabs')
+    await eleven.getByLabel('ElevenLabs API key', { exact: true }).fill('test-key-not-real')
+    await page.getByRole('button', { name: 'Live streaming', exact: true }).click()
+    await page.getByRole('button', { name: 'Start live comparison', exact: true }).click()
+    await expect(eleven.getByLabel('ElevenLabs transcript', { exact: true })).toContainText('Provisional words')
+    await page.getByRole('button', { name: /^Stop \d/ }).click()
+    if (outcome === 'cancel') await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+    else await expect(eleven.getByRole('alert')).toContainText('Provider closed before final confirmation.')
+    await expect(page.getByRole('button', { name: 'Start live comparison', exact: true })).toBeEnabled()
+    await expect(eleven.getByLabel('ElevenLabs transcript', { exact: true })).toContainText('Provisional words')
+    await expect(eleven.getByRole('button', { name: 'Copy', exact: true })).toBeDisabled()
+  })
+}
+
 test('renders cards, mode capabilities and responsive layout', async ({ page }) => {
   await setup(page)
   await expect(page.getByRole('article')).toHaveCount(4)

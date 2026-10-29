@@ -1,4 +1,4 @@
-export type Provider = 'azure' | 'openai' | 'deepgram' | 'soniox'
+export type Provider = 'azure' | 'openai' | 'deepgram' | 'soniox' | 'elevenlabs' | 'sarvam' | 'gemini'
 export type Mode = 'batch' | 'live'
 export type Options = {
   provider: Provider
@@ -12,6 +12,7 @@ export type Options = {
   punctuate: boolean
   endpoint_ms: number
   prompt: string
+  sarvam_mode: 'transcribe' | 'verbatim' | 'codemix' | 'translit'
 }
 export type Result = {
   text: string
@@ -26,15 +27,18 @@ export type Result = {
   mode?: Mode
 }
 export const emptyResult = (): Result => ({ text: '', interim: '', segments: [], warnings: [], status: 'idle' })
-export const catalog: { id: Provider; name: string; icon: string; color: string; models: Record<Mode, string[]>; note: string }[] = [
-  { id: 'azure', name: 'Azure Speech', icon: 'A', color: '#0078d4', models: { batch: ['azure-transcribe'], live: ['azure-realtime'] }, note: 'Fast file transcription / continuous live recognition' },
-  { id: 'openai', name: 'OpenAI', icon: 'O', color: '#172c27', models: { batch: ['gpt-transcribe', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'], live: [] }, note: 'File transcription. Live not included in this adapter.' },
-  { id: 'deepgram', name: 'Deepgram', icon: 'D', color: '#14835d', models: { batch: ['nova-3', 'nova-2'], live: ['nova-3', 'nova-2'] }, note: 'File and live transcription with interim results' },
-  { id: 'soniox', name: 'Soniox', icon: 'S', color: '#7751d1', models: { batch: ['stt-async-v5', 'stt-async-v4'], live: ['stt-rt-v5', 'stt-rt-v4'] }, note: 'Asynchronous files / real-time token streaming' },
+export const catalog: { id: Provider; name: string; icon: string; color: string; models: Record<Mode, string[]>; diarization: Mode[]; note: string }[] = [
+  { id: 'azure', name: 'Azure Speech', icon: 'A', color: '#0078d4', models: { batch: ['azure-transcribe'], live: ['azure-realtime'] }, diarization: ['batch'], note: 'Fast file transcription / continuous live recognition' },
+  { id: 'openai', name: 'OpenAI', icon: 'O', color: '#172c27', models: { batch: ['gpt-transcribe', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'], live: [] }, diarization: [], note: 'File transcription. Live not included in this adapter.' },
+  { id: 'deepgram', name: 'Deepgram', icon: 'D', color: '#14835d', models: { batch: ['nova-3', 'nova-2'], live: ['nova-3', 'nova-2'] }, diarization: ['batch', 'live'], note: 'File and live transcription with interim results' },
+  { id: 'soniox', name: 'Soniox', icon: 'S', color: '#7751d1', models: { batch: ['stt-async-v5', 'stt-async-v4'], live: ['stt-rt-v5', 'stt-rt-v4'] }, diarization: ['batch', 'live'], note: 'Asynchronous files / real-time token streaming' },
+  { id: 'elevenlabs', name: 'ElevenLabs', icon: 'E', color: '#292929', models: { batch: ['scribe_v2', 'scribe_v1'], live: ['scribe_v2_realtime'] }, diarization: ['batch'], note: 'Scribe file transcription / live partials with final text committed on Stop' },
+  { id: 'sarvam', name: 'Sarvam', icon: 'S', color: '#d56832', models: { batch: ['saaras:v4', 'saaras:v3'], live: ['saaras:v4', 'saaras:v3-realtime'] }, diarization: [], note: 'English + Indian languages. File clips must be under 30 seconds; long-audio batch jobs are not included. Live realtime streaming supports longer sessions; v3-realtime is beta' },
+  { id: 'gemini', name: 'Gemini', icon: 'G', color: '#4285f4', models: { batch: ['gemini-3.5-transcribe'], live: [] }, diarization: ['batch'], note: 'Dedicated Gemini Transcribe, with word timestamps. File only in this adapter; no Files API upload and interaction storage is disabled' },
 ]
 export const initialOptions = (provider: Provider): Options => ({
   provider, api_key: '', mode: 'batch', model: catalog.find(p => p.id === provider)!.models.batch[0],
-  language: 'en-US', region: 'eastus', resource: '', diarize: false, punctuate: true, endpoint_ms: 1000, prompt: '',
+  language: 'en-US', region: 'eastus', resource: '', diarize: false, punctuate: true, endpoint_ms: 1000, prompt: '', sarvam_mode: 'transcribe',
 })
 const configuredBase = (import.meta.env.VITE_API_BASE ?? '').replace(/\/+$/, '')
 const apiBase = configuredBase || window.location.origin
@@ -80,7 +84,7 @@ export function liveSession(options: Options, update: (fn: (previous: Result) =>
     const cancel = () => {
       if (terminal) return
       terminal = true
-      update(previous => ({ ...previous, status: 'cancelled', interim: '' }))
+      update(previous => ({ ...previous, status: 'cancelled' }))
       reject(new DOMException('Live comparison cancelled.', 'AbortError'))
       socket.close()
     }
@@ -117,7 +121,7 @@ export function liveSession(options: Options, update: (fn: (previous: Result) =>
           },
           stop() {
             if (socket.readyState === WebSocket.OPEN && !terminal) {
-              update(previous => ({ ...previous, status: 'working', interim: '' }))
+              update(previous => ({ ...previous, status: 'working' }))
               socket.send('{"type":"stop"}')
               stopTimer = setTimeout(() => {
                 fail('Timed out waiting for final results; partial text is preserved.')
