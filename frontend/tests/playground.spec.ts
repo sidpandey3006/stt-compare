@@ -1,0 +1,173 @@
+import { expect, test } from '@playwright/test'
+import type { Page } from '@playwright/test'
+
+async function setup(page: Page) {
+  await page.route('**/api/health', route => route.fulfill({ json: { ok: true } }))
+  await page.goto('/')
+  await expect(page.getByText('API connected', { exact: true })).toBeVisible()
+}
+
+async function configure(page: Page, name: string) {
+  const card = page.getByRole('article', { name, exact: true })
+  await card.getByRole('button', { name: 'Settings' }).click()
+  await card.getByLabel(`${name} API key`, { exact: true }).fill('test-key-not-real')
+  if (name === 'Azure Speech') await card.getByLabel('Azure resource name', { exact: true }).fill('test-resource')
+  return card
+}
+
+async function upload(page: Page) {
+  await page.getByLabel('Upload audio', { exact: true }).setInputFiles({
+    name: 'sample.wav', mimeType: 'audio/wav', buffer: Buffer.from('RIFF-example-audio'),
+  })
+}
+
+test('renders cards, mode capabilities and responsive layout', async ({ page }) => {
+  await setup(page)
+  await expect(page.getByRole('article')).toHaveCount(4)
+  await page.getByRole('button', { name: 'Live streaming', exact: true }).click()
+  await expect(page.getByRole('article', { name: 'OpenAI', exact: true }).getByRole('button', { name: 'Unavailable' })).toBeDisabled()
+  await expect(page.getByLabel('Upload audio', { exact: true })).toBeDisabled()
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
+
+test('validates provider keys before sending audio', async ({ page }) => {
+  await setup(page)
+  let requests = 0
+  await page.route('**/api/transcribe', route => { requests++; return route.fulfill({ json: {} }) })
+  await upload(page)
+  await page.getByRole('button', { name: 'Transcribe with 3 providers' }).click()
+  await expect(page.getByRole('alert')).toContainText('Enter API keys')
+  expect(requests).toBe(0)
+})
+
+test('sends identical audio, isolates errors, and exports no keys', async ({ page }) => {
+  await setup(page)
+  const bodies: string[] = []
+  await page.route('**/api/transcribe', async route => {
+    const body = route.request().postDataBuffer()!.toString()
+    bodies.push(body)
+    if (body.includes('"provider":"openai"')) {
+      await route.fulfill({ status: 502, json: { detail: 'Provider returned HTTP 401. Check your API key.' } })
+    } else await route.fulfill({ json: { text: 'A transcript from the same audio.', segments: [{ text: 'A transcript', speaker: 1 }], warnings: [], elapsed_ms: 750, model: body.includes('"provider":"azure"') ? 'azure-transcribe' : 'nova-3' } })
+  })
+  await configure(page, 'Azure Speech')
+  await configure(page, 'OpenAI')
+  await configure(page, 'Deepgram')
+  await upload(page)
+  await page.getByRole('button', { name: 'Transcribe with 3 providers' }).click()
+  await expect(page.getByLabel('Azure Speech transcript', { exact: true })).toContainText('A transcript from the same audio.')
+  await expect(page.getByLabel('Deepgram transcript', { exact: true })).toContainText('A transcript from the same audio.')
+  await expect(page.getByLabel('OpenAI transcript', { exact: true })).toContainText('HTTP 401')
+  expect(bodies).toHaveLength(3)
+  expect(bodies.every(body => body.includes('RIFF-example-audio'))).toBe(true)
+  const downloaded = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export JSON' }).click()
+  const download = await downloaded
+  const stream = await download.createReadStream()
+  let exported = ''
+  for await (const chunk of stream!) exported += chunk.toString()
+  expect(exported).not.toContain('test-key-not-real')
+  expect(JSON.parse(exported).transcripts).toHaveLength(3)
+  await page.getByRole('button', { name: 'Details / JSON' }).click()
+  await expect(page.getByLabel('Azure Speech transcript', { exact: true })).toContainText('"speaker": 1')
+  await upload(page)
+  await expect(page.getByRole('button', { name: 'Export JSON' })).toBeDisabled()
+  await expect(page.getByLabel('Azure Speech transcript', { exact: true })).not.toContainText('"speaker": 1')
+})
+
+test('records microphone as playable WAV before file transcription', async ({ page }) => {
+  await setup(page)
+  await page.getByRole('button', { name: 'Record microphone', exact: true }).click()
+  const stop = page.getByRole('button', { name: /^Stop \d/ })
+  await expect(stop).toBeVisible()
+  await page.waitForTimeout(500)
+  await stop.click()
+  await expect(page.getByText('microphone.wav', { exact: true })).toBeVisible()
+  const bytes = await page.getByLabel('Audio playback', { exact: true }).evaluate(async (audio: HTMLAudioElement) => {
+    const buffer = await (await fetch(audio.src)).arrayBuffer()
+    const view = new DataView(buffer)
+    return { header: new TextDecoder().decode(buffer.slice(0, 4)), rate: view.getUint32(24, true), size: buffer.byteLength }
+  })
+  expect(bytes.header).toBe('RIFF')
+  expect(bytes.rate).toBe(16000)
+  expect(bytes.size).toBeGreaterThan(44)
+})
+
+test('streams real mic PCM, replaces interim text, and drains final text on stop', async ({ page }) => {
+  let binaryFrames = 0
+  let stopReceived = false
+  await page.routeWebSocket('**/api/live', socket => {
+    socket.onMessage(data => {
+      if (typeof data === 'string') {
+        const event = JSON.parse(data)
+        if (event.type === 'stop') {
+          stopReceived = true
+          socket.send(JSON.stringify({ type: 'transcript', text: 'Hello world.', final: true, segments: [] }))
+          socket.send(JSON.stringify({ type: 'done' }))
+        } else socket.send(JSON.stringify({ type: 'ready' }))
+      } else {
+        binaryFrames++
+        socket.send(JSON.stringify({ type: 'transcript', text: binaryFrames === 1 ? 'Hel' : 'Hello', final: false }))
+      }
+    })
+  })
+  await setup(page)
+  await page.getByRole('button', { name: 'Clear', exact: true }).click()
+  const deepgram = page.getByRole('article', { name: 'Deepgram', exact: true })
+  await deepgram.getByRole('button', { name: '+ Include', exact: true }).click()
+  await page.getByRole('button', { name: 'Live streaming', exact: true }).click()
+  await configure(page, 'Deepgram')
+  await page.getByRole('button', { name: 'Start live comparison' }).click()
+  await expect(page.getByLabel('Deepgram transcript', { exact: true })).toContainText('Hello')
+  await page.getByRole('button', { name: /^Stop \d/ }).click()
+  await expect(page.getByLabel('Deepgram transcript', { exact: true })).toHaveText('Hello world.')
+  expect(binaryFrames).toBeGreaterThan(0)
+  expect(stopReceived).toBe(true)
+  await expect(page.getByText('microphone.wav', { exact: true })).toBeVisible()
+})
+
+test('reports microphone permission failures without leaving controls locked', async ({ page }) => {
+  await page.addInitScript(() => {
+    navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('Microphone permission denied', 'NotAllowedError'))
+  })
+  await setup(page)
+  await page.getByRole('button', { name: 'Record microphone', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Microphone permission denied')
+  await expect(page.getByRole('button', { name: 'Record microphone', exact: true })).toBeEnabled()
+})
+
+test('cancels file requests and preserves an explicit cancelled state', async ({ page }) => {
+  await setup(page)
+  await page.getByRole('button', { name: 'Clear', exact: true }).click()
+  const deepgram = page.getByRole('article', { name: 'Deepgram', exact: true })
+  await deepgram.getByRole('button', { name: '+ Include', exact: true }).click()
+  await configure(page, 'Deepgram')
+  await page.route('**/api/transcribe', async route => {
+    await new Promise(resolve => setTimeout(resolve, 1500))
+    await route.fulfill({ json: { text: 'Late result' } }).catch(() => {})
+  })
+  await upload(page)
+  await page.getByRole('button', { name: 'Transcribe with 1 provider', exact: true }).click()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(deepgram.getByText('Cancelled', { exact: true }).first()).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Transcribe with 1 provider', exact: true })).toBeEnabled()
+})
+
+test('cancels pending live connections and releases the microphone', async ({ page }) => {
+  let closed = false
+  await page.routeWebSocket('**/api/live', socket => {
+    socket.onClose(() => { closed = true })
+  })
+  await setup(page)
+  await page.getByRole('button', { name: 'Clear', exact: true }).click()
+  await page.getByRole('article', { name: 'Deepgram', exact: true }).getByRole('button', { name: '+ Include', exact: true }).click()
+  await page.getByRole('button', { name: 'Live streaming', exact: true }).click()
+  await configure(page, 'Deepgram')
+  await page.getByRole('button', { name: 'Start live comparison' }).click()
+  await expect(page.getByRole('article', { name: 'Deepgram', exact: true }).getByText('Connecting', { exact: true }).first()).toBeVisible()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Start live comparison' })).toBeEnabled()
+  expect(closed).toBe(true)
+  await expect(page.getByText('Comparison cancelled.', { exact: true })).toBeVisible()
+})
