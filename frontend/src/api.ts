@@ -78,6 +78,7 @@ export function liveSession(options: Options, update: (fn: (previous: Result) =>
   }
   return new Promise((resolve, reject) => {
     const cancel = () => {
+      if (terminal) return
       terminal = true
       update(previous => ({ ...previous, status: 'cancelled', interim: '' }))
       reject(new DOMException('Live comparison cancelled.', 'AbortError'))
@@ -92,6 +93,7 @@ export function liveSession(options: Options, update: (fn: (previous: Result) =>
     }, 35000)
     socket.onopen = () => socket.send(JSON.stringify(options))
     socket.onmessage = event => {
+      if (terminal) return
       let data
       try { data = JSON.parse(event.data) } catch {
         fail('Invalid live response from backend.')

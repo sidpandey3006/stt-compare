@@ -90,7 +90,8 @@ are sent only to selected providers when starting a comparison.
 Pages can deploy before `API_BASE` is set, but shows an explicit unconfigured
 backend banner and will not send transcription requests.
 The workflow validates Python, TypeScript, lint, and mocked browser interactions
-before deploying. Render free instances sleep while idle; initial requests may
+and builds the Linux deployment image with a native Azure SDK initialization
+check before deploying. Render free instances sleep while idle; initial requests may
 need a warm-up. WebSockets must be supported by your backend host.
 
 ## Privacy and operational limits

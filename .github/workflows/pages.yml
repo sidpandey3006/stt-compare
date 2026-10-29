@@ -23,6 +23,11 @@ jobs:
       - run: python -m ruff check backend
       - run: python -m pytest -q
         working-directory: backend
+      - run: docker build --tag stt-compare-api:check backend
+      - name: Verify native Azure SDK in deployment image
+        run: |
+          docker run --rm stt-compare-api:check python -c \
+            "import azure.cognitiveservices.speech as sdk; config = sdk.SpeechConfig(subscription='test-key', region='eastus'); stream = sdk.audio.PushAudioInputStream(stream_format=sdk.audio.AudioStreamFormat(samples_per_second=16000, bits_per_sample=16, channels=1)); recognizer = sdk.SpeechRecognizer(speech_config=config, audio_config=sdk.audio.AudioConfig(stream=stream)); stream.close(); print('Native SDK initialized without a provider request')"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
