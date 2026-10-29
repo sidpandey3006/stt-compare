@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from starlette.datastructures import UploadFile
 from starlette.responses import JSONResponse
 
-from providers import GEMINI_MIME, MAX_AUDIO, MODELS, ProviderError, Settings, transcribe
+from providers import AZURE_ENDPOINT_ERROR, GEMINI_MIME, MAX_AUDIO, MODELS, ProviderError, Settings, transcribe
 from streaming import STREAM_ERRORS, relay
 
 ORIGINS = [
@@ -67,11 +67,15 @@ async def providers():
 
 
 @app.exception_handler(ValidationError)
-async def validation_error(_request, _exc):
+async def validation_error(_request, exc: ValidationError):
     # Pydantic error details can contain the submitted API key.
-    return JSONResponse(
-        {"detail": "Invalid provider settings. Check model, language, resource/endpoint, and key."}, status_code=422
+    errors = exc.errors(include_input=False, include_context=False, include_url=False)
+    detail = (
+        AZURE_ENDPOINT_ERROR
+        if any(error["loc"] == ("resource",) for error in errors)
+        else "Invalid provider settings. Check model, language, resource/endpoint, and key."
     )
+    return JSONResponse({"detail": detail}, status_code=422)
 
 
 @app.post("/api/transcribe")

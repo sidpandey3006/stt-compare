@@ -91,13 +91,17 @@ Microphone capture requires HTTPS or localhost and AudioWorklet support.
 Use **Add provider** for additional adapters, then open **Settings** on each
 included card and enter your own API key. ElevenLabs uses an ElevenLabs API key,
 Sarvam a subscription key, and Gemini a Gemini API key with model access.
-For Azure file mode, paste the exact **Endpoint** from Azure Portal > your Speech
-resource > **Keys and Endpoint** into **Azure resource name or endpoint**.
-Both regional origins such as `https://westus.api.cognitive.microsoft.com/`
+For Azure file mode, paste the exact HTTPS resource **Endpoint** from Azure/Foundry
+**Keys and Endpoint** into **Azure resource name or endpoint**.
+Foundry resource origins such as `https://your-resource.services.ai.azure.com/`,
+regional origins such as `https://westus.api.cognitive.microsoft.com/`,
 and custom-subdomain origins such as `https://your-subdomain.cognitiveservices.azure.com/`
-are supported. A bare resource name still works if its matching custom subdomain
+are supported without rewriting the chosen hostname. A bare resource name still works if its matching custom subdomain
 exists, but the resource's display name is not necessarily its DNS subdomain.
-Do not use a Foundry project URL or add an API path, query string, or credentials.
+Use the resource origin, not a Foundry project URL: remove any `/api/projects/...`
+suffix or other API path. Do not add a query string, credentials, or port.
+The key must belong to that resource; Speech availability still depends on its
+region, permissions, and service support.
 There is no need to enable a custom domain to use a regional endpoint.
 Azure live mode needs the resource **region** (e.g. `eastus`) and an explicit
 locale or **Auto-detect** with candidate languages. Azure file mode uses the

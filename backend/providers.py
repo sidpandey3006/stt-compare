@@ -11,6 +11,11 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 MAX_AUDIO = 24 * 1024 * 1024
+AZURE_ENDPOINT_ERROR = (
+    "Invalid Azure resource/endpoint. Use a resource name or an HTTPS origin ending in "
+    ".services.ai.azure.com, .cognitiveservices.azure.com, or .api.cognitive.microsoft.com. "
+    "Remove /api/projects/... and other API paths; do not include credentials, ports, or query strings."
+)
 MODELS = {
     "azure": {"batch": ["azure-transcribe"], "live": ["azure-realtime"]},
     "openai": {"batch": ["gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"], "live": []},
@@ -94,11 +99,11 @@ class Settings(BaseModel):
             return value
         endpoint = value.lower()
         if re.fullmatch(
-            r"https://[a-z0-9][a-z0-9-]{0,62}\.(?:cognitiveservices\.azure\.com|api\.cognitive\.microsoft\.com)/?",
+            r"https://[a-z0-9][a-z0-9-]{0,62}\.(?:services\.ai\.azure\.com|cognitiveservices\.azure\.com|api\.cognitive\.microsoft\.com)/?",
             endpoint,
         ):
             return endpoint.rstrip("/")
-        raise ValueError("Use a Speech resource name or a supported Azure Speech HTTPS endpoint origin.")
+        raise ValueError(AZURE_ENDPOINT_ERROR)
 
     @model_validator(mode="after")
     def supported(self):

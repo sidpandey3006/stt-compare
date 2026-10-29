@@ -238,6 +238,7 @@ def test_azure_fast_transcription_settings(client):
     [
         "https://westus.api.cognitive.microsoft.com/",
         "https://custom-speech.cognitiveservices.azure.com/",
+        "https://my-foundry.services.ai.azure.com/",
     ],
 )
 @respx.mock
@@ -271,6 +272,8 @@ def test_azure_connection_failure_has_actionable_secret_safe_diagnostics(client,
     [
         "https://example.com",
         "https://westus.api.cognitive.microsoft.com.evil.example",
+        "https://my-foundry.services.ai.azure.com.evil.example",
+        "https://my-foundry.services.ai.azure.com/api/projects/private-project",
         "https://user:password@westus.api.cognitive.microsoft.com",
         "https://westus.api.cognitive.microsoft.com/project",
         "https://westus.api.cognitive.microsoft.com?key=private",
@@ -282,6 +285,10 @@ def test_azure_endpoint_rejects_untrusted_hosts_credentials_and_paths(client, re
     response = upload(client, config("azure", resource=resource))
     assert response.status_code == 422
     assert KEY not in response.text and resource not in response.text
+    assert "private-project" not in response.text
+    assert "Invalid Azure resource/endpoint" in response.json()["detail"]
+    assert "services.ai.azure.com" in response.json()["detail"]
+    assert "/api/projects/" in response.json()["detail"]
 
 
 @respx.mock

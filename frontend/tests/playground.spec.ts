@@ -153,26 +153,29 @@ test('validates provider keys before sending audio', async ({ page }) => {
   expect(requests).toBe(0)
 })
 
-test('Azure file mode accepts the exact regional endpoint from the portal', async ({ page }) => {
-  await setup(page)
-  await page.getByRole('button', { name: 'Clear', exact: true }).click()
-  const azure = page.getByRole('article', { name: 'Azure Speech', exact: true })
-  await azure.getByRole('button', { name: '+ Include', exact: true }).click()
-  await configure(page, 'Azure Speech')
-  await azure.getByLabel('Azure resource name or endpoint', { exact: true }).fill('https://westus.api.cognitive.microsoft.com/')
-  await expect(azure).toContainText('Keys and Endpoint')
-  let submitted = false
-  await page.route('**/api/transcribe', async route => {
-    const body = route.request().postDataBuffer()!.toString()
-    expect(body).toContain('"resource":"https://westus.api.cognitive.microsoft.com/"')
-    submitted = true
-    await route.fulfill({ json: { text: 'Regional endpoint transcript.', segments: [], warnings: [], elapsed_ms: 100, model: 'azure-transcribe' } })
+for (const endpoint of ['https://westus.api.cognitive.microsoft.com/', 'https://my-foundry.services.ai.azure.com/']) {
+  test(`Azure file mode preserves the exact endpoint ${endpoint}`, async ({ page }) => {
+    await setup(page)
+    await page.getByRole('button', { name: 'Clear', exact: true }).click()
+    const azure = page.getByRole('article', { name: 'Azure Speech', exact: true })
+    await azure.getByRole('button', { name: '+ Include', exact: true }).click()
+    await configure(page, 'Azure Speech')
+    await azure.getByLabel('Azure resource name or endpoint', { exact: true }).fill(endpoint)
+    await expect(azure).toContainText('Keys and Endpoint')
+    await expect(azure).toContainText('Remove any /api/projects/... suffix')
+    let submitted = false
+    await page.route('**/api/transcribe', async route => {
+      const body = route.request().postDataBuffer()!.toString()
+      expect(body).toContain(`"resource":"${endpoint}"`)
+      submitted = true
+      await route.fulfill({ json: { text: 'Azure endpoint transcript.', segments: [], warnings: [], elapsed_ms: 100, model: 'azure-transcribe' } })
+    })
+    await upload(page)
+    await page.getByRole('button', { name: 'Transcribe with 1 provider', exact: true }).click()
+    await expect(azure.getByLabel('Azure Speech transcript', { exact: true })).toContainText('Azure endpoint transcript.')
+    expect(submitted).toBe(true)
   })
-  await upload(page)
-  await page.getByRole('button', { name: 'Transcribe with 1 provider', exact: true }).click()
-  await expect(azure.getByLabel('Azure Speech transcript', { exact: true })).toContainText('Regional endpoint transcript.')
-  expect(submitted).toBe(true)
-})
+}
 
 test('Azure auto detection is visible, configurable, and works in live mode', async ({ page }) => {
   let language = ''
