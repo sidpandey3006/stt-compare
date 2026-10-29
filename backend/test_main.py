@@ -233,6 +233,57 @@ def test_azure_fast_transcription_settings(client):
     assert b'"diarization": {"enabled": true}' in route.calls.last.request.content
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://westus.api.cognitive.microsoft.com/",
+        "https://custom-speech.cognitiveservices.azure.com/",
+    ],
+)
+@respx.mock
+def test_azure_exact_endpoint_is_used_without_inventing_a_hostname(client, endpoint):
+    route = respx.post(f"{endpoint.rstrip('/')}/speechtotext/transcriptions:transcribe").respond(
+        200,
+        json={"combinedPhrases": [{"text": "Hello"}], "phrases": []},
+    )
+    response = upload(client, config("azure", resource=endpoint))
+    assert response.status_code == 200
+    assert response.json()["text"] == "Hello"
+    assert route.calls.last.request.headers["ocp-apim-subscription-key"] == KEY
+    assert route.calls.last.request.url.params["api-version"] == "2025-10-15"
+
+
+@respx.mock
+def test_azure_connection_failure_has_actionable_secret_safe_diagnostics(client, caplog):
+    respx.post("https://test-speech.cognitiveservices.azure.com/speechtotext/transcriptions:transcribe").mock(
+        side_effect=httpx.ConnectError(f"DNS/TLS failure: {KEY} private request data"),
+    )
+    response = upload(client, config("azure"))
+    assert response.status_code == 502
+    assert "Cannot connect to Azure Speech" in response.json()["detail"]
+    assert "Keys and Endpoint" in response.json()["detail"]
+    assert KEY not in response.text and "private request data" not in response.text
+    assert KEY not in caplog.text and "private request data" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "resource",
+    [
+        "https://example.com",
+        "https://westus.api.cognitive.microsoft.com.evil.example",
+        "https://user:password@westus.api.cognitive.microsoft.com",
+        "https://westus.api.cognitive.microsoft.com/project",
+        "https://westus.api.cognitive.microsoft.com?key=private",
+        "https://westus.api.cognitive.microsoft.com:8443",
+        "http://westus.api.cognitive.microsoft.com",
+    ],
+)
+def test_azure_endpoint_rejects_untrusted_hosts_credentials_and_paths(client, resource):
+    response = upload(client, config("azure", resource=resource))
+    assert response.status_code == 422
+    assert KEY not in response.text and resource not in response.text
+
+
 @respx.mock
 def test_deepgram_batch_transcript_and_diarization(client):
     route = respx.post("https://api.deepgram.com/v1/listen").respond(
@@ -324,7 +375,7 @@ def test_blocks_arbitrary_azure_host_and_unsupported_live_options():
         config("azure", resource="evil.test/path"),
         config("azure", resource=""),
         config("azure", mode="live", diarize=True),
-        config("azure", mode="live", language="auto"),
+        config("azure", mode="live", language="auto", azure_languages=[]),
         config("openai", mode="live"),
     ]:
         with pytest.raises(ValidationError):
@@ -624,7 +675,8 @@ def test_live_provider_error_and_disconnect_release_slots(client, monkeypatch):
     assert main.live_slots._value == 12
 
 
-def test_azure_live_push_stream_and_final_drain(client, monkeypatch):
+@pytest.mark.parametrize("language", ["en-US", "auto"])
+def test_azure_live_push_stream_and_final_drain(client, monkeypatch, language):
     import azure.cognitiveservices.speech as sdk
 
     class Signal:
@@ -664,17 +716,74 @@ def test_azure_live_push_stream_and_final_drain(client, monkeypatch):
         )
         recognizer.session_stopped.emit(None)
 
-    monkeypatch.setattr(sdk, "SpeechConfig", Mock())
-    monkeypatch.setattr(sdk, "SpeechRecognizer", Mock(return_value=recognizer))
+    speech_config = Mock()
+    config_factory = Mock(return_value=speech_config)
+    recognizer_factory = Mock(return_value=recognizer)
+    auto_config = object()
+    candidate_factory = Mock(return_value=auto_config)
+    monkeypatch.setattr(sdk, "SpeechConfig", config_factory)
+    monkeypatch.setattr(sdk, "SpeechRecognizer", recognizer_factory)
+    monkeypatch.setattr(sdk.languageconfig, "AutoDetectSourceLanguageConfig", candidate_factory)
+    monkeypatch.setattr(sdk, "AutoDetectSourceLanguageResult", Mock(return_value=SimpleNamespace(language="en-US")))
     monkeypatch.setattr(sdk.audio, "PushAudioInputStream", Mock(return_value=SimpleNamespace(write=write, close=close)))
     monkeypatch.setattr(sdk.audio, "AudioConfig", Mock())
     monkeypatch.setattr(sdk.audio, "AudioStreamFormat", Mock())
     with client.websocket_connect("/api/live", headers={"Origin": ORIGIN}) as socket:
-        socket.send_json(config("azure", mode="live"))
+        socket.send_json(config("azure", mode="live", language=language))
         assert socket.receive_json()["type"] == "ready"
         socket.send_bytes(b"\x00\x00" * 100)
         assert socket.receive_json()["final"] is False
         socket.send_text('{"type":"stop"}')
-        assert socket.receive_json()["text"] == "Hello world"
+        final = socket.receive_json()
+        assert final["text"] == "Hello world"
+        if language == "auto":
+            assert final["segments"][0]["locale"] == "en-US"
         assert socket.receive_json()["type"] == "done"
     recognizer.stop_continuous_recognition_async.assert_called_once()
+    if language == "auto":
+        config_factory.assert_called_once_with(
+            subscription=KEY,
+            endpoint="wss://eastus.stt.speech.microsoft.com/speech/universal/v2",
+        )
+        speech_config.set_property.assert_called_once_with(
+            sdk.PropertyId.SpeechServiceConnection_LanguageIdMode, "Continuous"
+        )
+        candidate_factory.assert_called_once_with(languages=["en-US", "hi-IN"])
+        assert recognizer_factory.call_args.kwargs["auto_detect_source_language_config"] is auto_config
+    else:
+        config_factory.assert_called_once_with(subscription=KEY, region="eastus")
+        assert speech_config.speech_recognition_language == "en-US"
+        candidate_factory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "candidates",
+    [
+        [],
+        ["en-US"],
+        ["en-US", "en-GB"],
+        ["en", "hi-IN"],
+        ["en-US", "hi-IN", "ta-IN", "te-IN", "kn-IN", "ml-IN", "mr-IN", "bn-IN", "gu-IN", "fr-FR", "de-DE"],
+    ],
+)
+def test_azure_live_auto_rejects_invalid_candidate_configuration(client, candidates):
+    with client.websocket_connect("/api/live", headers={"Origin": ORIGIN}) as socket:
+        socket.send_json(config("azure", mode="live", language="auto", azure_languages=candidates))
+        response = socket.receive_json()
+        assert response["type"] == "error"
+        assert KEY not in str(response)
+    assert main.live_slots._value == 12
+
+
+@respx.mock
+def test_azure_file_auto_does_not_inherit_hidden_live_candidate_restrictions(client):
+    route = respx.post(
+        "https://test-speech.cognitiveservices.azure.com/speechtotext/transcriptions:transcribe"
+    ).respond(
+        200,
+        json={"combinedPhrases": [{"text": "Hello namaste"}], "phrases": [{"locale": "hi-IN", "text": "namaste"}]},
+    )
+    response = upload(client, config("azure", language="auto", azure_languages=[]))
+    assert response.status_code == 200
+    assert response.json()["segments"][0]["locale"] == "hi-IN"
+    assert b'"locales"' not in route.calls.last.request.content

@@ -252,35 +252,41 @@ async def azure_live(browser: WebSocket, s: Settings):
     def emit(event):
         loop.call_soon_threadsafe(enqueue, event)
 
-    config = speechsdk.SpeechConfig(subscription=s.key, region=s.region)
-    config.speech_recognition_language = s.language
+    if s.language == "auto":
+        config = speechsdk.SpeechConfig(
+            subscription=s.key, endpoint=f"wss://{s.region}.stt.speech.microsoft.com/speech/universal/v2"
+        )
+        config.set_property(speechsdk.PropertyId.SpeechServiceConnection_LanguageIdMode, "Continuous")
+        auto_detect = speechsdk.languageconfig.AutoDetectSourceLanguageConfig(languages=s.azure_languages)
+    else:
+        config = speechsdk.SpeechConfig(subscription=s.key, region=s.region)
+        config.speech_recognition_language = s.language
+        auto_detect = None
     stream = speechsdk.audio.PushAudioInputStream(
         stream_format=speechsdk.audio.AudioStreamFormat(samples_per_second=SAMPLE_RATE, bits_per_sample=16, channels=1)
     )
     recognizer = speechsdk.SpeechRecognizer(
-        speech_config=config, audio_config=speechsdk.audio.AudioConfig(stream=stream)
+        speech_config=config,
+        audio_config=speechsdk.audio.AudioConfig(stream=stream),
+        auto_detect_source_language_config=auto_detect,
     )
     recognizer.recognizing.connect(lambda e: emit({"type": "transcript", "text": e.result.text, "final": False}))
-    recognizer.recognized.connect(
-        lambda e: (
-            emit(
-                {
-                    "type": "transcript",
-                    "text": e.result.text,
-                    "final": True,
-                    "segments": [{"text": e.result.text, "offset": e.result.offset, "duration": e.result.duration}],
-                }
-            )
-            if e.result.reason == speechsdk.ResultReason.RecognizedSpeech
-            else None
-        )
-    )
+
+    def recognized(event):
+        if event.result.reason != speechsdk.ResultReason.RecognizedSpeech:
+            return
+        segment = {"text": event.result.text, "offset": event.result.offset, "duration": event.result.duration}
+        if s.language == "auto":
+            segment["locale"] = speechsdk.AutoDetectSourceLanguageResult(event.result).language
+        emit({"type": "transcript", "text": event.result.text, "final": True, "segments": [segment]})
+
+    recognizer.recognized.connect(recognized)
     recognizer.session_stopped.connect(lambda _: emit({"type": "ended"}))
     recognizer.canceled.connect(
         lambda e: emit(
             {
                 "type": "error" if e.reason == speechsdk.CancellationReason.Error else "ended",
-                "message": "Azure ended recognition. Check your key, region, locale, and quota.",
+                "message": "Azure ended recognition. Check your key, region, language/candidates, networking, and quota.",
             }
         )
     )

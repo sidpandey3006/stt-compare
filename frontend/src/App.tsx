@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { capture, MAX_BYTES, MAX_SECONDS, wav } from './audio'
-import { catalog, emptyResult, endpoint, initialOptions, liveSession, needsBackend, transcribe } from './api'
+import { azureLanguages, catalog, emptyResult, endpoint, initialOptions, liveSession, needsBackend, transcribe } from './api'
 import type { LiveSession, Mode, Options, Provider, Result } from './api'
 
 const ids = catalog.map(provider => provider.id)
@@ -46,6 +46,8 @@ export default function App() {
   const mounted = useRef(true)
   const busy = phase !== 'idle'
   const active = visible.filter(id => selected.includes(id) && catalog.find(p => p.id === id)!.models[mode].length > 0)
+  const azureAuto = mode === 'live' && language === 'auto' && active.includes('azure')
+  const invalidCandidates = azureAuto && (options.azure.azure_languages.length < 2 || options.azure.azure_languages.length > 10)
   const available = catalog.filter(provider => !visible.includes(provider.id) && provider.name.toLowerCase().includes(providerSearch.toLowerCase().trim()))
 
   useEffect(() => {
@@ -119,9 +121,9 @@ export default function App() {
     }
     if (active.includes('azure') && mode === 'batch' && !options.azure.resource.trim()) {
       setDetails(previous => [...new Set([...previous, 'azure' as Provider])])
-      throw new Error('Enter your Azure resource name (not a project endpoint URL) in its settings.')
+      throw new Error('Enter your Azure Speech resource name or the exact endpoint from Azure Keys and Endpoint in its settings.')
     }
-    if (active.includes('azure') && mode === 'live' && language === 'auto') throw new Error('Choose an explicit language for Azure live transcription, or exclude Azure.')
+    if (invalidCandidates) throw new Error('Select 2-10 candidate languages for Azure live auto-detection.')
   }
 
   function changeOption(id: Provider, patch: Partial<Options>) {
@@ -300,7 +302,7 @@ export default function App() {
             <div className="studio-title"><span className="live-dot" /> Comparison studio <span className="count">{active.length} included</span></div>
             <fieldset disabled={busy} className="toolbar-settings">
               <label className="language-label"><span>Language</span><select aria-label="Language" value={language} onChange={event => setLanguage(event.target.value)}>
-                <option value="auto">Auto / multilingual</option>
+                <option value="auto">Auto-detect</option>
                 <option value="en-US">English (US)</option><option value="en-IN">English (India)</option><option value="en-GB">English (UK)</option>
                 <option value="hi-IN">Hindi</option><option value="ta-IN">Tamil</option><option value="te-IN">Telugu</option><option value="kn-IN">Kannada</option>
                 <option value="ml-IN">Malayalam</option><option value="mr-IN">Marathi</option><option value="bn-IN">Bengali</option><option value="gu-IN">Gujarati</option>
@@ -316,6 +318,22 @@ export default function App() {
             </fieldset>
           </div>
 
+          {language === 'auto' && <section className="language-guidance" aria-label="Auto language detection">
+            <h2>Auto-detect is provider-specific</h2><p>Each provider chooses the spoken language using its own supported languages and model. Auto-detection does not guarantee word-by-word mixed-language transcription.</p>
+            {mode === 'batch' && active.includes('azure') && <p>Azure file mode uses its multilingual model without a fixed locale; language coverage differs from live recognition.</p>}
+            {azureAuto && <><details className="candidate-picker">
+              <summary><strong>Azure live languages</strong><span>{options.azure.azure_languages.map(code => azureLanguages.find(candidate => candidate.code === code)?.name ?? code).join(', ') || 'None selected'}</span><em>Edit candidates</em></summary>
+              <fieldset className="language-candidates" disabled={busy}>
+              <legend>Azure live candidate languages <span>{options.azure.azure_languages.length}/10 selected</span></legend>
+              <p>Choose 2-10 likely languages. Azure detects switches between utterances, not within the same sentence. Other providers use their own detection.</p>
+              <div className="language-chips">{azureLanguages.map(candidate => {
+                const checked = options.azure.azure_languages.includes(candidate.code)
+                return <label key={candidate.code} className={checked ? 'selected' : ''}><input type="checkbox" checked={checked} disabled={!checked && options.azure.azure_languages.length >= 10} onChange={event => changeOption('azure', { azure_languages: event.target.checked ? [...options.azure.azure_languages, candidate.code] : options.azure.azure_languages.filter(code => code !== candidate.code) })} />{candidate.name}</label>
+              })}</div>
+              </fieldset>
+            </details>{invalidCandidates && <p className="candidate-error" role="status">Select at least two candidate languages before starting Azure live recognition.</p>}</>}
+          </section>}
+
           <div className="input-zone">
             <div className="input-top"><div><h2>Start with your audio</h2><p>Speak naturally or bring a recording. Everyone gets the same input.</p></div>
               <div className="mode-tabs" role="group" aria-label="Transcription mode">
@@ -324,7 +342,7 @@ export default function App() {
               </div>
             </div>
             <div className="audio-controls">
-              <button className={`record-button ${phase === 'recording' ? 'recording' : ''}`} disabled={busy && phase !== 'recording'} onClick={() => phase === 'recording' ? void stopRecording() : void startRecording()}>
+              <button className={`record-button ${phase === 'recording' ? 'recording' : ''}`} disabled={(busy && phase !== 'recording') || invalidCandidates} onClick={() => phase === 'recording' ? void stopRecording() : void startRecording()}>
                 <span aria-hidden="true">{phase === 'recording' ? '\u25a0' : '\u25cf'}</span>
                 {phase === 'recording' ? `Stop ${seconds(elapsed)}` : phase === 'starting' ? 'Connecting...' : mode === 'live' ? 'Start live comparison' : 'Record microphone'}
               </button>
@@ -365,10 +383,11 @@ export default function App() {
                   <div className="provider-card-actions"><button disabled={busy || !supported} aria-pressed={included && supported} className={`include-button ${included && supported ? 'on' : ''}`} onClick={() => setSelected(previous => previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id])}>{!supported ? 'Unavailable' : included ? '\u2713 Included' : '+ Include'}</button><button className="remove-provider" disabled={busy} aria-label={`Remove ${provider.name}`} title={`Remove ${provider.name} and clear its key`} onClick={() => removeProvider(id)}>{'\u00d7'}</button></div>
                 </div>
                 <div className="provider-config"><span className={`status ${result.status}`}><i />{statusLabels[result.status]}</span><button aria-expanded={open} className="settings-toggle" onClick={() => setDetails(previous => open ? previous.filter(value => value !== id) : [...previous, id])}>Settings {open ? '\u2212' : '+'}</button></div>
+                {supported && <div className="provider-language">Next run: {language === 'auto' ? id === 'azure' && mode === 'live' ? 'auto-detect from selected candidates' : 'provider-managed auto-detection' : language}</div>}
                 {open && <fieldset className="settings-panel" disabled={busy || !supported}>
                   <label>API key <input type="password" autoComplete="off" spellCheck={false} aria-label={`${provider.name} API key`} value={options[id].api_key} placeholder="Kept in memory for this tab" onChange={event => changeOption(id, { api_key: event.target.value })} /></label>
                   <label>Model <select aria-label={`${provider.name} model`} value={config.model ?? ''} onChange={event => changeOption(id, { model: event.target.value })}>{provider.models[mode].map(model => <option key={model}>{model}</option>)}</select></label>
-                  {id === 'azure' && <label>{mode === 'batch' ? 'Azure resource name' : 'Azure region'}<input aria-label={mode === 'batch' ? 'Azure resource name' : 'Azure region'} value={mode === 'batch' ? options.azure.resource : options.azure.region} placeholder={mode === 'batch' ? 'my-speech-resource (not a URL)' : 'eastus'} onChange={event => changeOption(id, mode === 'batch' ? { resource: event.target.value } : { region: event.target.value })} /></label>}
+                  {id === 'azure' && <><label>{mode === 'batch' ? 'Azure resource name or endpoint' : 'Azure region'}<input aria-label={mode === 'batch' ? 'Azure resource name or endpoint' : 'Azure region'} value={mode === 'batch' ? options.azure.resource : options.azure.region} placeholder={mode === 'batch' ? 'https://westus.api.cognitive.microsoft.com/' : 'eastus'} onChange={event => changeOption(id, mode === 'batch' ? { resource: event.target.value } : { region: event.target.value })} /></label>{mode === 'batch' && <p>Recommended: paste the exact HTTPS endpoint from Azure Portal &rarr; your Speech resource &rarr; Keys and Endpoint. Regional and custom-subdomain endpoints are supported. A bare resource name works only when its matching custom subdomain exists; do not use a Foundry project URL.</p>}</>}
                   {provider.diarization.includes(mode) && <label className="check-label"><input type="checkbox" checked={config.diarize} onChange={event => changeOption(id, { diarize: event.target.checked })} /> Speaker diarization (labels in Details / JSON)</label>}
                   {id === 'deepgram' && <label className="check-label"><input type="checkbox" checked={config.punctuate} onChange={event => changeOption(id, { punctuate: event.target.checked })} /> Punctuation and smart formatting</label>}
                   {mode === 'live' && (id === 'deepgram' || id === 'soniox' || id === 'sarvam') && <label>Endpoint silence: {config.endpoint_ms} ms<input aria-label={`${provider.name} endpoint silence`} type="range" min="500" max="3000" step="100" value={config.endpoint_ms} onChange={event => changeOption(id, { endpoint_ms: Number(event.target.value) })} /></label>}

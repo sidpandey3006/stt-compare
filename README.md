@@ -91,10 +91,39 @@ Microphone capture requires HTTPS or localhost and AudioWorklet support.
 Use **Add provider** for additional adapters, then open **Settings** on each
 included card and enter your own API key. ElevenLabs uses an ElevenLabs API key,
 Sarvam a subscription key, and Gemini a Gemini API key with model access.
-Azure file mode additionally requires the Speech **resource name**, not a
-Foundry project URL. Azure live mode needs the resource **region** (e.g. `eastus`)
-and an explicit locale. Azure file mode uses the resource-hosted
+For Azure file mode, paste the exact **Endpoint** from Azure Portal > your Speech
+resource > **Keys and Endpoint** into **Azure resource name or endpoint**.
+Both regional origins such as `https://westus.api.cognitive.microsoft.com/`
+and custom-subdomain origins such as `https://your-subdomain.cognitiveservices.azure.com/`
+are supported. A bare resource name still works if its matching custom subdomain
+exists, but the resource's display name is not necessarily its DNS subdomain.
+Do not use a Foundry project URL or add an API path, query string, or credentials.
+There is no need to enable a custom domain to use a regional endpoint.
+Azure live mode needs the resource **region** (e.g. `eastus`) and an explicit
+locale or **Auto-detect** with candidate languages. Azure file mode uses the
 `2025-10-15` Fast Transcription API.
+
+### Auto language detection
+
+The shared **Auto-detect** choice is not a promise that every provider supports
+word-by-word code switching. The UI explains provider-specific behavior before
+recording, and each card shows the language configuration for its next run.
+
+- Azure file auto mode omits a fixed locale and uses the service's multilingual
+  model. Its language coverage differs from live recognition.
+- Azure live auto mode uses the Speech SDK's **continuous language identification**
+  through the region's Speech v2 endpoint, not a literal `auto` locale. Choose
+  2-10 likely candidate languages in the visible selector; the initial selection
+  is English and Hindi. Only one locale per base language is allowed. Azure can
+  detect language changes between utterances, but not within the same sentence.
+  The selected candidates must include the spoken language; Azure can return a
+  candidate even when the actual language is outside the list. Detected locales
+  are preserved in Details / JSON.
+- Other adapters use their provider's documented automatic-language behavior;
+  supported languages, mixed-language recognition, and formatting vary by model.
+
+Live comparisons are disabled when Azure has fewer than two candidates. This
+constraint does not carry into file mode or a fixed-language live run.
 
 Keys are kept in React memory, not local storage, URLs, exports, or cookies.
 They pass through this backend, so host it somewhere you trust. Keys and audio
@@ -165,7 +194,9 @@ They do **not** establish successful transcription with real paid provider accou
 ## API references
 
 - [Azure Fast Transcription](https://learn.microsoft.com/azure/ai-services/speech-service/fast-transcription-create)
+- [Azure Fast Transcription endpoint reference](https://learn.microsoft.com/rest/api/speechtotext/transcriptions/transcribe?view=rest-speechtotext-2025-10-15)
 - [Azure continuous recognition](https://learn.microsoft.com/azure/ai-services/speech-service/how-to-recognize-speech)
+- [Azure language identification](https://learn.microsoft.com/azure/ai-services/speech-service/language-identification)
 - [OpenAI file transcription](https://developers.openai.com/api/docs/guides/speech-to-text)
 - [Deepgram live API](https://developers.deepgram.com/reference/speech-to-text/listen-streaming)
 - [Soniox asynchronous transcription](https://soniox.com/docs/stt/async/async-transcription)

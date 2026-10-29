@@ -70,7 +70,7 @@ async def providers():
 async def validation_error(_request, _exc):
     # Pydantic error details can contain the submitted API key.
     return JSONResponse(
-        {"detail": "Invalid provider settings. Check model, language, resource, and key."}, status_code=422
+        {"detail": "Invalid provider settings. Check model, language, resource/endpoint, and key."}, status_code=422
     )
 
 
@@ -130,9 +130,24 @@ async def batch(request: Request):
             raise HTTPException(502, str(exc)) from None
         except (TimeoutError, httpx.TimeoutException):
             raise HTTPException(504, "Provider timed out. Try a shorter recording or retry.") from None
-        except (httpx.HTTPError, KeyError, ValueError):
+        except httpx.ConnectError:
+            logger.warning("Provider connection failed: %s", settings.provider)
+            detail = (
+                "Cannot connect to Azure Speech. Use the exact endpoint from Azure Keys and Endpoint; "
+                "the resource name is not always its DNS subdomain. Check networking/firewall settings. "
+                "Private endpoints are not reachable from this public backend."
+                if settings.provider == "azure"
+                else "Cannot connect to the provider. Check network connectivity and retry."
+            )
+            raise HTTPException(502, detail) from None
+        except httpx.HTTPError:
             logger.warning("Provider request failed: %s", settings.provider)
-            raise HTTPException(502, "Provider connection or response failed. Check settings and retry.") from None
+            raise HTTPException(502, "Provider network request failed. Check connectivity and retry.") from None
+        except (KeyError, ValueError):
+            logger.warning("Unexpected provider response: %s", settings.provider)
+            raise HTTPException(
+                502, "Provider returned an unexpected response. Check the endpoint, API version, and audio format."
+            ) from None
         finally:
             batch_slots.release()
 

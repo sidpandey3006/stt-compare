@@ -11,7 +11,10 @@ async function configure(page: Page, name: string) {
   const card = page.getByRole('article', { name, exact: true })
   await card.getByRole('button', { name: 'Settings' }).click()
   await card.getByLabel(`${name} API key`, { exact: true }).fill('test-key-not-real')
-  if (name === 'Azure Speech') await card.getByLabel('Azure resource name', { exact: true }).fill('test-resource')
+  if (name === 'Azure Speech') {
+    const resource = card.getByLabel('Azure resource name or endpoint', { exact: true })
+    if (await resource.isVisible()) await resource.fill('test-resource')
+  }
   return card
 }
 
@@ -148,6 +151,94 @@ test('validates provider keys before sending audio', async ({ page }) => {
   await page.getByRole('button', { name: 'Transcribe with 3 providers' }).click()
   await expect(page.getByRole('alert')).toContainText('Enter API keys')
   expect(requests).toBe(0)
+})
+
+test('Azure file mode accepts the exact regional endpoint from the portal', async ({ page }) => {
+  await setup(page)
+  await page.getByRole('button', { name: 'Clear', exact: true }).click()
+  const azure = page.getByRole('article', { name: 'Azure Speech', exact: true })
+  await azure.getByRole('button', { name: '+ Include', exact: true }).click()
+  await configure(page, 'Azure Speech')
+  await azure.getByLabel('Azure resource name or endpoint', { exact: true }).fill('https://westus.api.cognitive.microsoft.com/')
+  await expect(azure).toContainText('Keys and Endpoint')
+  let submitted = false
+  await page.route('**/api/transcribe', async route => {
+    const body = route.request().postDataBuffer()!.toString()
+    expect(body).toContain('"resource":"https://westus.api.cognitive.microsoft.com/"')
+    submitted = true
+    await route.fulfill({ json: { text: 'Regional endpoint transcript.', segments: [], warnings: [], elapsed_ms: 100, model: 'azure-transcribe' } })
+  })
+  await upload(page)
+  await page.getByRole('button', { name: 'Transcribe with 1 provider', exact: true }).click()
+  await expect(azure.getByLabel('Azure Speech transcript', { exact: true })).toContainText('Regional endpoint transcript.')
+  expect(submitted).toBe(true)
+})
+
+test('Azure auto detection is visible, configurable, and works in live mode', async ({ page }) => {
+  let language = ''
+  let candidates: string[] = []
+  await page.routeWebSocket('**/api/live', socket => {
+    socket.onMessage(data => {
+      if (typeof data === 'string') {
+        const event = JSON.parse(data)
+        if (event.type === 'stop') {
+          socket.send(JSON.stringify({ type: 'transcript', text: 'Hello namaste.', final: true, segments: [{ locale: 'hi-IN' }] }))
+          socket.send(JSON.stringify({ type: 'done' }))
+        } else {
+          language = event.language
+          candidates = event.azure_languages
+          socket.send(JSON.stringify({ type: 'ready' }))
+        }
+      } else socket.send(JSON.stringify({ type: 'transcript', text: 'Hello', final: false }))
+    })
+  })
+  await setup(page)
+  await page.getByRole('button', { name: 'Clear', exact: true }).click()
+  const azure = page.getByRole('article', { name: 'Azure Speech', exact: true })
+  await azure.getByRole('button', { name: '+ Include', exact: true }).click()
+  await page.getByRole('button', { name: 'Live streaming', exact: true }).click()
+  await configure(page, 'Azure Speech')
+  await page.getByLabel('Language', { exact: true }).selectOption('auto')
+  const guidance = page.getByRole('region', { name: 'Auto language detection', exact: true })
+  await expect(guidance).toContainText('does not guarantee word-by-word mixed-language')
+  await expect(guidance).toContainText('English, Hindi')
+  await guidance.getByText('Edit candidates', { exact: true }).click()
+  await expect(guidance.getByRole('checkbox', { name: 'English', exact: true })).toBeChecked()
+  await expect(guidance.getByRole('checkbox', { name: 'Hindi', exact: true })).toBeChecked()
+  await guidance.getByRole('checkbox', { name: 'Hindi', exact: true }).uncheck()
+  await expect(page.getByRole('button', { name: 'Start live comparison', exact: true })).toBeDisabled()
+  await expect(guidance.getByRole('status')).toContainText('at least two')
+  await guidance.getByRole('checkbox', { name: 'Tamil', exact: true }).check()
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.getByRole('button', { name: 'Start live comparison', exact: true }).click()
+  await expect(azure.getByLabel('Azure Speech transcript', { exact: true })).toContainText('Hello')
+  await expect(guidance.getByRole('checkbox', { name: 'Tamil', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: /^Stop \d/ }).click()
+  await expect(azure.getByLabel('Azure Speech transcript', { exact: true })).toHaveText('Hello namaste.')
+  expect(language).toBe('auto')
+  expect(candidates).toEqual(['en-US', 'ta-IN'])
+})
+
+test('Azure live candidate limits stay visible and do not block file auto mode', async ({ page }) => {
+  await setup(page)
+  await page.getByRole('button', { name: 'Live streaming', exact: true }).click()
+  await page.getByLabel('Language', { exact: true }).selectOption('auto')
+  const guidance = page.getByRole('region', { name: 'Auto language detection', exact: true })
+  await guidance.getByText('Edit candidates', { exact: true }).click()
+  for (const name of ['Tamil', 'Telugu', 'Kannada', 'Malayalam', 'Marathi', 'Bengali', 'Gujarati', 'Odia']) {
+    await guidance.getByRole('checkbox', { name, exact: true }).check()
+  }
+  await expect(guidance.getByRole('checkbox', { name: 'French', exact: true })).toBeDisabled()
+  await expect(guidance).toContainText('10/10 selected')
+  for (const checkbox of await guidance.getByRole('checkbox').all()) {
+    if (await checkbox.isChecked()) await checkbox.uncheck()
+  }
+  await expect(page.getByRole('button', { name: 'Start live comparison', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: 'Recorded / file', exact: true }).click()
+  await expect(page.getByRole('group', { name: /Azure live candidate languages/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Record microphone', exact: true })).toBeEnabled()
+  await expect(guidance).toContainText('multilingual model without a fixed locale')
 })
 
 test('sends identical audio, isolates errors, and exports no keys', async ({ page }) => {

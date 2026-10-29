@@ -13,6 +13,7 @@ export type Options = {
   endpoint_ms: number
   prompt: string
   sarvam_mode: 'transcribe' | 'verbatim' | 'codemix' | 'translit'
+  azure_languages: string[]
 }
 export type Result = {
   text: string
@@ -27,6 +28,15 @@ export type Result = {
   mode?: Mode
 }
 export const emptyResult = (): Result => ({ text: '', interim: '', segments: [], warnings: [], status: 'idle' })
+export const azureLanguages = [
+  { code: 'en-US', name: 'English' }, { code: 'hi-IN', name: 'Hindi' }, { code: 'ta-IN', name: 'Tamil' },
+  { code: 'te-IN', name: 'Telugu' }, { code: 'kn-IN', name: 'Kannada' }, { code: 'ml-IN', name: 'Malayalam' },
+  { code: 'mr-IN', name: 'Marathi' }, { code: 'bn-IN', name: 'Bengali' }, { code: 'gu-IN', name: 'Gujarati' },
+  { code: 'or-IN', name: 'Odia' }, { code: 'pa-IN', name: 'Punjabi' }, { code: 'as-IN', name: 'Assamese' },
+  { code: 'ur-IN', name: 'Urdu' }, { code: 'es-ES', name: 'Spanish' }, { code: 'fr-FR', name: 'French' },
+  { code: 'de-DE', name: 'German' }, { code: 'ja-JP', name: 'Japanese' }, { code: 'zh-CN', name: 'Chinese' },
+  { code: 'ar-SA', name: 'Arabic' },
+]
 export const catalog: { id: Provider; name: string; icon: string; color: string; models: Record<Mode, string[]>; diarization: Mode[]; note: string }[] = [
   { id: 'azure', name: 'Azure Speech', icon: 'A', color: '#0078d4', models: { batch: ['azure-transcribe'], live: ['azure-realtime'] }, diarization: ['batch'], note: 'Fast file transcription / continuous live recognition' },
   { id: 'openai', name: 'OpenAI', icon: 'O', color: '#172c27', models: { batch: ['gpt-transcribe', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1'], live: [] }, diarization: [], note: 'File transcription. Live not included in this adapter.' },
@@ -39,6 +49,7 @@ export const catalog: { id: Provider; name: string; icon: string; color: string;
 export const initialOptions = (provider: Provider): Options => ({
   provider, api_key: '', mode: 'batch', model: catalog.find(p => p.id === provider)!.models.batch[0],
   language: 'en-US', region: 'eastus', resource: '', diarize: false, punctuate: true, endpoint_ms: 1000, prompt: '', sarvam_mode: 'transcribe',
+  azure_languages: ['en-US', 'hi-IN'],
 })
 const configuredBase = (import.meta.env.VITE_API_BASE ?? '').replace(/\/+$/, '')
 const apiBase = configuredBase || window.location.origin

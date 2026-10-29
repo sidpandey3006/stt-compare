@@ -8,7 +8,7 @@ from typing import Literal
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 MAX_AUDIO = 24 * 1024 * 1024
 MODELS = {
@@ -70,12 +70,35 @@ class Settings(BaseModel):
     model: str = Field(max_length=80)
     language: str = Field(default="en-US", pattern=r"^(auto|[a-z]{2,3}(-[A-Za-z0-9]{2,8})?)$")
     region: str = Field(default="eastus", pattern=r"^[a-z0-9]{2,40}$")
-    resource: str = Field(default="", pattern=r"^([a-zA-Z0-9][a-zA-Z0-9-]{0,62})?$")
+    resource: str = Field(default="", max_length=253)
     diarize: bool = False
     punctuate: bool = True
     endpoint_ms: int = Field(default=1000, ge=500, le=3000)
     prompt: str = Field(default="", max_length=2000)
     sarvam_mode: Literal["transcribe", "verbatim", "codemix", "translit"] = "transcribe"
+    azure_languages: list[str] = Field(default_factory=lambda: ["en-US", "hi-IN"], max_length=10)
+
+    @field_validator("azure_languages")
+    @classmethod
+    def candidate_languages(cls, value: list[str]) -> list[str]:
+        if any(not re.fullmatch(r"[a-z]{2,3}-[A-Z]{2}", locale) for locale in value):
+            raise ValueError("Azure candidate languages require full BCP-47 locales.")
+        if len({locale.split("-")[0] for locale in value}) != len(value):
+            raise ValueError("Choose only one locale per candidate language.")
+        return value
+
+    @field_validator("resource")
+    @classmethod
+    def resource_or_endpoint(cls, value: str) -> str:
+        if not value or re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9-]{0,62}", value):
+            return value
+        endpoint = value.lower()
+        if re.fullmatch(
+            r"https://[a-z0-9][a-z0-9-]{0,62}\.(?:cognitiveservices\.azure\.com|api\.cognitive\.microsoft\.com)/?",
+            endpoint,
+        ):
+            return endpoint.rstrip("/")
+        raise ValueError("Use a Speech resource name or a supported Azure Speech HTTPS endpoint origin.")
 
     @model_validator(mode="after")
     def supported(self):
@@ -87,9 +110,9 @@ class Settings(BaseModel):
             raise ValueError("Invalid API key.")
         if self.provider == "azure":
             if self.mode == "batch" and not self.resource:
-                raise ValueError("Azure file transcription requires your resource name.")
-            if self.mode == "live" and self.language == "auto":
-                raise ValueError("Choose an explicit locale for Azure live transcription.")
+                raise ValueError("Azure file transcription requires a resource name or endpoint.")
+            if self.mode == "live" and self.language == "auto" and len(self.azure_languages) < 2:
+                raise ValueError("Choose 2-10 candidate languages for Azure live auto-detection.")
             if self.mode == "live" and self.diarize:
                 raise ValueError("Speaker labels are not available in this Azure live adapter.")
         if self.provider == "openai" and self.diarize:
@@ -116,6 +139,12 @@ class Settings(BaseModel):
         return self.language.split("-")[0]
 
     @property
+    def azure_endpoint(self) -> str:
+        if self.resource.startswith("https://"):
+            return self.resource
+        return f"https://{self.resource}.cognitiveservices.azure.com"
+
+    @property
     def sarvam_language(self) -> str:
         if self.lang == "en":
             return "en-IN"
@@ -135,7 +164,7 @@ def checked(response: httpx.Response) -> dict:
             400: "Check the audio format, language, and model settings.",
             401: "Check your API key.",
             403: "Check account permissions, region, and model access.",
-            404: "Check the model and Azure resource name.",
+            404: "Check the model and Azure Speech resource name or endpoint.",
             413: "The provider rejected the audio size.",
             429: "Quota or rate limit reached. Check your provider account.",
         }.get(code, "The provider could not process this request.")
@@ -190,7 +219,7 @@ async def transcribe(s: Settings, audio: bytes, filename: str, content_type: str
                 definition["locales"] = [s.language]
             result = checked(
                 await client.post(
-                    f"https://{s.resource}.cognitiveservices.azure.com/speechtotext/transcriptions:transcribe",
+                    f"{s.azure_endpoint}/speechtotext/transcriptions:transcribe",
                     params={"api-version": "2025-10-15"},
                     headers={"Ocp-Apim-Subscription-Key": s.key},
                     files={"audio": (filename, audio, content_type)},

@@ -27,7 +27,7 @@ jobs:
       - name: Verify native Azure SDK in deployment image
         run: |
           docker run --rm stt-compare-api:check python -c \
-            "import azure.cognitiveservices.speech as sdk; config = sdk.SpeechConfig(subscription='test-key', region='eastus'); stream = sdk.audio.PushAudioInputStream(stream_format=sdk.audio.AudioStreamFormat(samples_per_second=16000, bits_per_sample=16, channels=1)); recognizer = sdk.SpeechRecognizer(speech_config=config, audio_config=sdk.audio.AudioConfig(stream=stream)); stream.close(); print('Native SDK initialized without a provider request')"
+            "import azure.cognitiveservices.speech as sdk; config = sdk.SpeechConfig(subscription='test-key', region='eastus'); stream = sdk.audio.PushAudioInputStream(stream_format=sdk.audio.AudioStreamFormat(samples_per_second=16000, bits_per_sample=16, channels=1)); recognizer = sdk.SpeechRecognizer(speech_config=config, audio_config=sdk.audio.AudioConfig(stream=stream)); auto_config = sdk.SpeechConfig(subscription='test-key', endpoint='wss://eastus.stt.speech.microsoft.com/speech/universal/v2'); auto_config.set_property(sdk.PropertyId.SpeechServiceConnection_LanguageIdMode, 'Continuous'); candidates = sdk.languageconfig.AutoDetectSourceLanguageConfig(languages=['en-US', 'hi-IN']); auto_recognizer = sdk.SpeechRecognizer(speech_config=auto_config, audio_config=sdk.audio.AudioConfig(stream=stream), auto_detect_source_language_config=candidates); stream.close(); print('Fixed-language and auto-detect native SDK initialized without a provider request')"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
